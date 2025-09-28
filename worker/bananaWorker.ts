@@ -116,7 +116,7 @@ async function withConnRetries<T>(fn: (c: Connection) => Promise<T>, attempts = 
 }
 
 /* ================= Admin ops → front page ================= */
-async function recordOps(partial: { lastClaim?: any; lastSwap?: any }) {
+async function recordOps(partial: { lastClaim?: any; lastSwap?: any; lastAirdrop?: any }) {
   if (!ADMIN_SECRET || !ADMIN_OPS_URL) return;
   try {
     await fetch(ADMIN_OPS_URL, {
@@ -433,7 +433,7 @@ async function snapshotAndDistribute() {
   // Exclude whales (optional)
   const excluded = holdersRaw.filter(h => h.balance > AUTO_BLACKLIST_BALANCE);
   if (excluded.length > 0) {
-    console.log(`[SNAPSHOT] Excluded ${excluded length} wallets over cap ${AUTO_BLACKLIST_BALANCE}`);
+    console.log(`[SNAPSHOT] Excluded ${excluded.length} wallets over cap ${AUTO_BLACKLIST_BALANCE}`);
   }
 
   const holders = holdersRaw.filter(h => h.balance <= AUTO_BLACKLIST_BALANCE);
@@ -462,8 +462,18 @@ async function snapshotAndDistribute() {
 
   sentCycles.add(cycleId);
 
-  // 5) (Optional) You can compute and log totals for observability
+  // 5) Publish (optional telemetry)
   const totalSent = rows.reduce((a, r) => a + r.amountUi, 0);
+  await recordOps({
+    lastAirdrop: {
+      at: new Date().toISOString(),
+      cycleId,
+      totalSentUi: totalSent,
+      wallets: rows.length,
+      mode: "proportional",
+    }
+  });
+
   console.log(`[AIRDROP] done | wallets=${rows.length} | totalSentUi=${totalSent} | cycle=${cycleId}`);
 }
 
