@@ -218,9 +218,9 @@ async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippage
     `&enableDexes=pump,meteora,raydium` +
     `&onlyDirectRoutes=false`;
   for (let i = 0; i < 3; i++) {
-    const r = await fetch(url, { cache: "no-store" });
+    const r = await fetch(url);
     if (r.ok) {
-      const j = await r.json();
+      const j: any = await r.json();
       if (j && j.routePlan?.length) return j;
     }
     await sleep(300 * (i + 1));
@@ -245,7 +245,8 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
     const txt = await r.text();
     throw new Error(`Jupiter swap failed: ${r.status} ${txt}`);
   }
-  const { swapTransaction } = await r.json();
+  const jr: any = await r.json();
+  const swapTransaction = jr.swapTransaction;
   const txBytes = Uint8Array.from(Buffer.from(swapTransaction, "base64"));
   const tx = VersionedTransaction.deserialize(txBytes);
   tx.sign([signer]);
@@ -432,7 +433,7 @@ async function snapshotAndDistribute() {
   // Exclude whales (optional)
   const excluded = holdersRaw.filter(h => h.balance > AUTO_BLACKLIST_BALANCE);
   if (excluded.length > 0) {
-    console.log(`[SNAPSHOT] Excluded ${excluded.length} wallets over cap ${AUTO_BLACKLIST_BALANCE}`);
+    console.log(`[SNAPSHOT] Excluded ${excluded length} wallets over cap ${AUTO_BLACKLIST_BALANCE}`);
   }
 
   const holders = holdersRaw.filter(h => h.balance <= AUTO_BLACKLIST_BALANCE);
