@@ -18,7 +18,7 @@ import {
 import bs58 from "bs58";
 
 /* ================= CONFIG ================= */
-const CYCLE_MINUTES = 5;
+const CYCLE_MINUTES = 3;
 
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
 const REWARD_WALLET = process.env.REWARD_WALLET || ""; // should match dev wallet pubkey
@@ -80,7 +80,13 @@ function floorCycleStart(d = new Date()) {
 function nextTimes() {
   const start = floorCycleStart();
   const end   = new Date(start.getTime() + CYCLE_MINUTES * 60_000);
-  return { id: String(start.getTime()), start, end, tMinus60: new Date(end.getTime() - 60_000), tMinus10: new Date(end.getTime() - 10_000) };
+  return {
+    id: String(start.getTime()),
+    start,
+    end,
+    tMinus90: new Date(end.getTime() - 90_000),  // claim/swap at t-1:30
+    tMinus5:  new Date(end.getTime() - 5_000),   // airdrop at t-5s
+  };
 }
 function looksRetryableMessage(msg: string) {
   return /rate.?limit|429|timeout|temporar|connection|ECONNRESET|ETIMEDOUT|blockhash|Node is behind|Transaction was not confirmed/i.test(msg);
@@ -270,7 +276,7 @@ async function pollSolDelta(conn: Connection, owner: PublicKey, preSol: number) 
   return { postSol: b, deltaSol: Math.max(0, b - preSol) };
 }
 
-/* ================= Claim + Swap (T-60s) ================= */
+/* ================= Claim + Swap (T-90s) ================= */
 async function triggerClaimAndSwap90() {
   const cycleId = String(floorCycleStart().getTime());
   if (!PUMPORTAL_KEY) {
@@ -339,7 +345,7 @@ async function triggerClaimAndSwap90() {
   return { claimedSol, swapSig, claimSig };
 }
 
-/* ================= Snapshot + Airdrop (T-10s) ================= */
+/* ================= Snapshot + Airdrop (T-5s) ================= */
 const sentCycles = new Set<string>();
 
 function isTxTooLarge(err: any): boolean {
@@ -481,14 +487,14 @@ async function snapshotAndDistribute() {
 async function loop() {
   const fired = new Set<string>();
   for (;;) {
-    const { id, end, tMinus60, tMinus10 } = nextTimes();
+    const { id, end, tMinus90, tMinus5 } = nextTimes();
     const now = new Date();
 
-    if (!fired.has(id + ":claim") && now >= tMinus60) {
+    if (!fired.has(id + ":claim") && now >= tMinus90) {
       try { await triggerClaimAndSwap90(); } catch (e) { console.error("Claim/swap error:", e); }
       fired.add(id + ":claim");
     }
-    if (!fired.has(id + ":dist") && now >= tMinus10) {
+    if (!fired.has(id + ":dist") && now >= tMinus5) {
       try { await snapshotAndDistribute(); } catch (e) { console.error("Airdrop error:", e); }
       fired.add(id + ":dist");
     }
