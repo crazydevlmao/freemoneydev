@@ -210,7 +210,7 @@ function HoldersGrowthChart({ data }: { data: { t: number; holders: number }[] }
 
 /** Simple confetti burst using framer-motion (no extra deps) */
 function ConfettiBurst({ active }: { active: boolean }) {
-  const pieces = useMemo(
+  const pieces = React.useMemo(
     () =>
       Array.from({ length: 70 }).map((_, i) => ({
         id: i,
@@ -221,7 +221,9 @@ function ConfettiBurst({ active }: { active: boolean }) {
       })),
     [active]
   );
+
   if (!active) return null;
+
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
       {pieces.map((p) => (
@@ -229,7 +231,11 @@ function ConfettiBurst({ active }: { active: boolean }) {
           key={p.id}
           initial={{ x: `${p.x}%`, y: '-10%', rotate: 0, opacity: 0 }}
           animate={{ y: '110%', rotate: p.rot, opacity: [0, 1, 1, 0] }}
-          transition={{ duration: 1.4 + Math.random() * 0.4, delay: p.delay, ease: 'ease-out' }}
+          transition={{
+            duration: 1.4 + Math.random() * 0.4,
+            delay: p.delay,
+            ease: 'easeOut', // <-- fixed
+          }}
           style={{
             position: 'absolute',
             left: 0,
@@ -247,6 +253,7 @@ function ConfettiBurst({ active }: { active: boolean }) {
     </div>
   );
 }
+
 
 /** ================== MAIN APP ================== */
 export default function FreemoneyApp() {
@@ -730,3 +737,4 @@ export default function FreemoneyApp() {
     </div>
   );
 }
+
