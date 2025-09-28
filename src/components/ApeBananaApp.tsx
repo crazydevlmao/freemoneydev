@@ -72,6 +72,33 @@ const copyToClipboard = async (text: string) => {
   return false;
 };
 
+/** ======== NEW: localStorage helpers to prefill and accumulate totals ======== */
+const AIRDROP_LS_KEY = 'freemoney_airdrops_seen';
+const LASTCLAIM_LS_KEY = 'freemoney_last_claim';
+
+const getAirdropMap = (): Record<string, number> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    return JSON.parse(localStorage.getItem(AIRDROP_LS_KEY) || '{}');
+  } catch {
+    return {};
+  }
+};
+const saveAirdropMap = (m: Record<string, number>) => {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(AIRDROP_LS_KEY, JSON.stringify(m));
+};
+const addAirdropToLS = (cycleId: string, total: number) => {
+  const m = getAirdropMap();
+  if (!m[cycleId]) {
+    m[cycleId] = total;
+    saveAirdropMap(m);
+  }
+  return Object.values(m).reduce((a, b) => a + (Number(b) || 0), 0);
+};
+const sumAirdropsFromLS = () =>
+  Object.values(getAirdropMap()).reduce((a, b) => a + (Number(b) || 0), 0);
+
 /** ================== COSMIC CURSOR ================== */
 function useCosmicCursor() {
   const mounted = useRef(false);
@@ -234,7 +261,7 @@ function ConfettiBurst({ active }: { active: boolean }) {
           transition={{
             duration: 1.4 + Math.random() * 0.4,
             delay: p.delay,
-            ease: 'easeOut', // <-- fixed
+            ease: 'easeOut', // TS-friendly
           }}
           style={{
             position: 'absolute',
@@ -279,6 +306,20 @@ export default function FreemoneyApp() {
   const [growth, setGrowth] = useState<{ t: number; holders: number }[]>([]);
   const [range, setRange] = useState<'1H' | '1D' | '1W' | '1M' | '1Y' | 'YTD' | 'ALL'>('ALL');
 
+  /** ======== NEW: prefill from localStorage on mount ======== */
+  useEffect(() => {
+    try {
+      const lcRaw = localStorage.getItem(LASTCLAIM_LS_KEY);
+      if (lcRaw) {
+        const lc = JSON.parse(lcRaw);
+        if (lc && typeof lc.amount !== 'undefined') {
+          setOps((prev) => ({ ...prev, lastClaim: lc }));
+        }
+      }
+    } catch {}
+    setTotalCoinAirdropped(sumAirdropsFromLS());
+  }, []);
+
   // Poll snapshot
   useEffect(() => {
     let alive = true;
@@ -302,7 +343,13 @@ export default function FreemoneyApp() {
           const mc = Number(j?.marketCapUsd);
           setMarket({ marketCapUsd: Number.isFinite(mc) ? mc : null });
 
-          if (j?.ops) setOps(j.ops);
+          /** ======== NEW: merge ops (don’t wipe) + cache lastClaim ======== */
+          if (j?.ops) {
+            setOps((prev) => ({ ...prev, ...j.ops }));
+            if (j.ops.lastClaim) {
+              try { localStorage.setItem(LASTCLAIM_LS_KEY, JSON.stringify(j.ops.lastClaim)); } catch {}
+            }
+          }
 
           // FREEMONEY stats
           setCoinHoldingsTokens(
@@ -313,17 +360,28 @@ export default function FreemoneyApp() {
               : null
           );
 
-          // Robust fallbacks for "given away"
-          const totalGivenRaw =
+          /** ======== NEW: robust “given away” with LS accumulation per cycle ======== */
+          const serverTotal =
             j?.totalCoinAirdropped ??
             j?.airdropTotalUi ??
             j?.totalAirdropped ??
             j?.stats?.totalAirdroppedUi ??
             j?.ops?.totalAirdroppedUi ??
-            j?.ops?.lastAirdrop?.totalSentUi ??
             null;
 
-          setTotalCoinAirdropped(totalGivenRaw != null ? Number(totalGivenRaw) : null);
+          if (serverTotal != null && Number.isFinite(Number(serverTotal))) {
+            setTotalCoinAirdropped(Number(serverTotal));
+          } else {
+            // Fold in lastAirdrop (if present) keyed by cycleId
+            const la = j?.ops?.lastAirdrop ?? null;
+            if (la?.cycleId && Number.isFinite(Number(la.totalSentUi))) {
+              const sum = addAirdropToLS(String(la.cycleId), Number(la.totalSentUi));
+              setTotalCoinAirdropped(sum);
+            } else {
+              setTotalCoinAirdropped(sumAirdropsFromLS());
+            }
+          }
+
           setCoinPriceUsd(j?.coinPriceUsd != null ? Number(j.coinPriceUsd) : null);
 
           // Growth tick
@@ -737,4 +795,3 @@ export default function FreemoneyApp() {
     </div>
   );
 }
-
