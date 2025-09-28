@@ -1,18 +1,19 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "noEmit": false,                 // <— overrides root noEmit
+    "noEmit": false,               
     "target": "ES2022",
     "lib": ["ES2022"],
-    "module": "CommonJS",            // <— emit CJS for node
+    "module": "CommonJS",           
     "moduleResolution": "Node",
     "types": ["node"],
     "strict": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "outDir": "dist",                // emits to dist/worker/...
+    "outDir": "dist",              
     "rootDir": "."
   },
   "include": ["worker/**/*.ts"]
 }
+
