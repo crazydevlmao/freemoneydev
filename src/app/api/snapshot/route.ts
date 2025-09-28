@@ -156,7 +156,7 @@ async function getHolders(mint: string): Promise<Holder[]> {
       return out;
     }
 
-    let merged: Record<string, number> = {};
+    const merged: Record<string, number> = {};
     try {
       const a = await byProgram("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", true);
       for (const [k, v] of Object.entries(a)) merged[k] = (merged[k] ?? 0) + (v as number);
@@ -331,4 +331,5 @@ export async function GET(req: Request) {
     });
   }
 }
+
 
