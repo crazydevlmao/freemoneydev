@@ -440,15 +440,17 @@ export default function FreemoneyApp() {
     };
   }, []);
 
-  // Derived
-  const safe = Array.isArray(holders) ? holders : [];
-  const enriched = useMemo(() => {
-    const rows: Row[] = safe
-      .map((h) => ({ wallet: h.wallet, tokens: Number(h.balance) || 0 }))
-      .filter((r) => r.tokens > 0)
-      .sort((a, b) => b.tokens - a.tokens);
-    return { rows, totalTokens: rows.reduce((a, r) => a + r.tokens, 0) };
-  }, [safe]);
+// Derived
+const enriched = useMemo(() => {
+  const list = Array.isArray(holders) ? holders : [];
+  const rows: Row[] = list
+    .map((h) => ({ wallet: h.wallet, tokens: Number(h.balance) || 0 }))
+    .filter((r) => r.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens);
+
+  return { rows, totalTokens: rows.reduce((a, r) => a + r.tokens, 0) };
+}, [holders]);
+
 
   // Countdown
   const [target, setTarget] = useState(() => nextCycleBoundary());
@@ -912,3 +914,4 @@ export default function FreemoneyApp() {
     </div>
   );
 }
+
