@@ -2,7 +2,7 @@
 // Edge snapshot – ALL holders via getProgramAccounts (legacy + token22), cached & single-flight.
 // Also returns OPS + Metrics for transparency panel.
 
-export const runtime = "edge";
+export const runtime = "nodejs"; // was "edge"
 export const preferredRegion = "iad1";
 
 import { OPS, METRICS } from "@/lib/state";
@@ -331,5 +331,6 @@ export async function GET(req: Request) {
     });
   }
 }
+
 
 
