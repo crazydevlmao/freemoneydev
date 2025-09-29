@@ -7,7 +7,8 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'rec
 
 /** ================== CONFIG ================== */
 const CYCLE_MINUTES = 3; // cycle is 3 minutes
-
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
+const SNAPSHOT_URL = API_BASE ? `${API_BASE}/api/snapshot` : '/api/snapshot';
 /** ================== TYPES ================== */
 type Holder = { wallet: string; balance: number };
 type Row = { wallet: string; tokens: number };
@@ -325,7 +326,7 @@ export default function FreemoneyApp() {
     let alive = true;
     const load = async () => {
       try {
-        const res = await fetch('/api/snapshot', { cache: 'no-store' });
+        const res = await fetch(SNAPSHOT_URL, { cache: 'no-store', mode: API_BASE ? 'cors' : 'same-origin' });
         if (!alive) return;
         if (res.ok) {
           const j: any = await res.json();
@@ -505,7 +506,7 @@ if (j?.ops) {
   // Snapshot download
   const handleDownloadSnapshot = async () => {
     try {
-      const res = await fetch('/api/snapshot', { cache: 'no-store' });
+      const res = await fetch(SNAPSHOT_URL, { cache: 'no-store', mode: API_BASE ? 'cors' : 'same-origin' });
       const data = await res.json();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -818,4 +819,5 @@ if (j?.ops) {
     </div>
   );
 }
+
 
