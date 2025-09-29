@@ -6,6 +6,13 @@ import { OPS, type TxRef } from "@/lib/state";
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
+type AirdropRef = {
+  at?: string;
+  totalSentUi?: number;
+  count?: number;
+  cycleId?: string;
+};
+
 export async function POST(req: Request) {
   const auth =
     req.headers.get("x-admin-secret") ||
@@ -18,10 +25,31 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const { lastClaim, lastSwap } = body as { lastClaim?: TxRef | null; lastSwap?: TxRef | null };
+    const { lastClaim, lastSwap, lastAirdrop } = body as {
+      lastClaim?: TxRef | null;
+      lastSwap?: TxRef | null;
+      lastAirdrop?: AirdropRef | null;
+    };
 
+    // Latest claim/swap passthrough (used by "Latest Drop (SOL)")
     if (lastClaim && typeof lastClaim.amount === "number") OPS.lastClaim = lastClaim;
-    if (lastSwap && typeof lastSwap.amount === "number") OPS.lastSwap = lastSwap;
+    if (lastSwap  && typeof lastSwap.amount  === "number") OPS.lastSwap  = lastSwap;
+
+    // Track latest airdrop and accumulate total given away (FREEMONEY given away)
+    if (lastAirdrop && typeof lastAirdrop.totalSentUi === "number") {
+      const incomingCycleId = lastAirdrop.cycleId ?? null;
+      const alreadyCounted =
+        incomingCycleId &&
+        OPS.lastAirdrop?.cycleId &&
+        OPS.lastAirdrop.cycleId === incomingCycleId;
+
+      OPS.lastAirdrop = lastAirdrop;
+
+      if (!alreadyCounted) {
+        OPS.totalAirdroppedUi =
+          (Number(OPS.totalAirdroppedUi) || 0) + Number(lastAirdrop.totalSentUi);
+      }
+    }
 
     return new Response(JSON.stringify({ ok: true, OPS }), {
       status: 200,
