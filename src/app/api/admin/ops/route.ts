@@ -1,5 +1,5 @@
 // src/app/api/admin/ops/route.ts
-export const runtime = "edge";
+export const runtime = "nodejs"; // was "edge"
 export const preferredRegion = "iad1";
 
 import { OPS, type TxRef, type AirdropRef } from "@/lib/state";
@@ -81,3 +81,4 @@ export async function POST(req: Request) {
     );
   }
 }
+
