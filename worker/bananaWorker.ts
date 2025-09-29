@@ -123,15 +123,27 @@ async function withConnRetries<T>(fn: (c: Connection) => Promise<T>, attempts = 
 
 /* ================= Admin ops → front page ================= */
 async function recordOps(partial: { lastClaim?: any; lastSwap?: any; lastAirdrop?: any }) {
-  if (!ADMIN_SECRET || !ADMIN_OPS_URL) return;
+  if (!ADMIN_SECRET || !ADMIN_OPS_URL) {
+    console.warn("[OPS] Skipped: missing ADMIN_SECRET or ADMIN_OPS_URL");
+    return;
+  }
   try {
-    await fetch(ADMIN_OPS_URL, {
+    const res = await fetch(ADMIN_OPS_URL, {
       method: "POST",
       headers: { "content-type": "application/json", "x-admin-secret": ADMIN_SECRET },
       body: JSON.stringify(partial),
     });
-  } catch { /* swallow */ }
+    const text = await res.text();
+    if (!res.ok) {
+      console.error(`[OPS] POST ${res.status}: ${text}`);
+    } else {
+      console.log(`[OPS] OK -> ${Object.keys(partial).join(", ")} | ${text}`);
+    }
+  } catch (e: any) {
+    console.error("[OPS] Network error:", e?.message || e);
+  }
 }
+
 
 /* ================= PumpPortal (claim only) ================= */
 function portalUrl(path: string) {
@@ -508,3 +520,4 @@ loop().catch((err) => {
   console.error("bananaWorker crashed:", err);
   process.exit(1);
 });
+
