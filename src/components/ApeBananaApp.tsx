@@ -343,13 +343,25 @@ export default function FreemoneyApp() {
           const mc = Number(j?.marketCapUsd);
           setMarket({ marketCapUsd: Number.isFinite(mc) ? mc : null });
 
-          /** ======== NEW: merge ops (don’t wipe) + cache lastClaim ======== */
-          if (j?.ops) {
-            setOps((prev) => ({ ...prev, ...j.ops }));
-            if (j.ops.lastClaim) {
-              try { localStorage.setItem(LASTCLAIM_LS_KEY, JSON.stringify(j.ops.lastClaim)); } catch {}
-            }
-          }
+         /** ======== merge ops, but don't clobber non-null with null ======== */
+if (j?.ops) {
+  setOps((prev) => ({
+    ...prev,
+    lastClaim:    j.ops.lastClaim    ?? prev.lastClaim,
+    lastSwap:     j.ops.lastSwap     ?? prev.lastSwap,
+    lastAirdrop:  j.ops.lastAirdrop  ?? prev.lastAirdrop,
+    totalAirdroppedUi:
+      (typeof j.ops.totalAirdroppedUi === 'number'
+        ? j.ops.totalAirdroppedUi
+        : prev.totalAirdroppedUi),
+  }));
+
+  // cache lastClaim for prefill
+  if (j.ops.lastClaim) {
+    try { localStorage.setItem(LASTCLAIM_LS_KEY, JSON.stringify(j.ops.lastClaim)); } catch {}
+  }
+}
+
 
           // FREEMONEY stats
           setCoinHoldingsTokens(
@@ -532,6 +544,17 @@ export default function FreemoneyApp() {
             <style>{`@keyframes shine{0%{background-position:0% 50%}100%{background-position:200% 50%}}`}</style>
           </div>
           <div className="flex items-center gap-2">
+            {/* X (Twitter) button */}
+<a
+  href="https://x.com/freemoneydotsol"
+  target="_blank"
+  rel="noopener noreferrer"
+  className="px-3 py-1.5 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 transition text-[11px] cursor-pointer flex items-center gap-1"
+  title="Follow on X"
+>
+  <span className="font-semibold">𝕏</span>
+</a>
+
             <div className="px-3 py-1.5 rounded-xl border border-white/10 bg-white/5">
               <div className="flex items-center gap-2 text-[11px]">
                 <span className="uppercase tracking-[0.18em] text-zinc-400">CA</span>
@@ -795,3 +818,4 @@ export default function FreemoneyApp() {
     </div>
   );
 }
+
