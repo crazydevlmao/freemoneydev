@@ -7,6 +7,19 @@ export const preferredRegion = "iad1";
 
 import { OPS, METRICS } from "@/lib/state";
 
+// ===== CORS =====
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+const CORS = {
+  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+  "Access-Control-Allow-Methods": "GET,OPTIONS",
+  "Access-Control-Allow-Headers": "content-type",
+  Vary: "Origin",
+};
+
+export async function OPTIONS() {
+  return new Response(null, { status: 204, headers: CORS });
+}
+
 // ===== ENV =====
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
 const HELIUS_RPC =
@@ -280,7 +293,7 @@ export async function GET(req: Request) {
   if (!HELIUS_RPC) {
     return new Response(
       JSON.stringify({ error: "Missing HELIUS_RPC/HELIUS_API_KEY" }),
-      { status: 500 }
+      { status: 500, headers: { ...CORS, "content-type": "application/json; charset=utf-8" } }
     );
   }
 
@@ -320,6 +333,7 @@ export async function GET(req: Request) {
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: {
+        ...CORS,
         "content-type": "application/json; charset=utf-8",
         "Cache-Control": `public, max-age=0, s-maxage=${S_MAXAGE}, stale-while-revalidate=${STALE_REVAL}`,
       },
@@ -327,10 +341,7 @@ export async function GET(req: Request) {
   } catch (e: any) {
     return new Response(JSON.stringify({ error: e?.message || "snapshot failed" }), {
       status: 500,
-      headers: { "Cache-Control": "no-store" },
+      headers: { ...CORS, "Cache-Control": "no-store", "content-type": "application/json; charset=utf-8" },
     });
   }
 }
-
-
-
