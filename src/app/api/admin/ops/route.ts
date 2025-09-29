@@ -2,16 +2,9 @@
 export const runtime = "edge";
 export const preferredRegion = "iad1";
 
-import { OPS, type TxRef } from "@/lib/state";
+import { OPS, type TxRef, type AirdropRef } from "@/lib/state";
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
-
-type AirdropRef = {
-  at?: string;
-  totalSentUi?: number;
-  count?: number;
-  cycleId?: string;
-};
 
 export async function POST(req: Request) {
   const auth =
@@ -25,29 +18,55 @@ export async function POST(req: Request) {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const { lastClaim, lastSwap, lastAirdrop } = body as {
-      lastClaim?: TxRef | null;
-      lastSwap?: TxRef | null;
-      lastAirdrop?: AirdropRef | null;
+
+    const {
+      lastClaim,
+      lastSwap,
+      lastAirdrop,
+    } = body as {
+      lastClaim?: Partial<TxRef> | null;
+      lastSwap?: Partial<TxRef> | null;
+      lastAirdrop?: Partial<AirdropRef> | null;
     };
 
-    // Latest claim/swap passthrough (used by "Latest Drop (SOL)")
-    if (lastClaim && typeof lastClaim.amount === "number") OPS.lastClaim = lastClaim;
-    if (lastSwap  && typeof lastSwap.amount  === "number") OPS.lastSwap  = lastSwap;
+    // ---- lastClaim (SOL creator-fee delta) ----
+    if (lastClaim && typeof lastClaim.amount === "number") {
+      const clean: TxRef = {
+        at: lastClaim.at ?? new Date().toISOString(),
+        amount: Number(lastClaim.amount),
+        tx: lastClaim.tx ?? null,
+      };
+      OPS.lastClaim = clean;
+    }
 
-    // Track latest airdrop and accumulate total given away (FREEMONEY given away)
+    // ---- lastSwap (optional) ----
+    if (lastSwap && typeof lastSwap.amount === "number") {
+      const clean: TxRef = {
+        at: lastSwap.at ?? new Date().toISOString(),
+        amount: Number(lastSwap.amount),
+        tx: lastSwap.tx ?? null,
+      };
+      OPS.lastSwap = clean;
+    }
+
+    // ---- lastAirdrop (token “given away”) + cumulative ----
     if (lastAirdrop && typeof lastAirdrop.totalSentUi === "number") {
-      const incomingCycleId = lastAirdrop.cycleId ?? null;
-      const alreadyCounted =
-        incomingCycleId &&
-        OPS.lastAirdrop?.cycleId &&
-        OPS.lastAirdrop.cycleId === incomingCycleId;
+      const clean: AirdropRef = {
+        at: lastAirdrop.at ?? new Date().toISOString(),
+        totalSentUi: Number(lastAirdrop.totalSentUi),
+        count: typeof lastAirdrop.count === "number" ? lastAirdrop.count : undefined,
+        cycleId: typeof lastAirdrop.cycleId === "string" ? lastAirdrop.cycleId : undefined,
+      };
 
-      OPS.lastAirdrop = lastAirdrop;
+      const alreadyCounted =
+        !!(OPS.lastAirdrop &&
+           clean.cycleId &&
+           OPS.lastAirdrop.cycleId === clean.cycleId);
+
+      OPS.lastAirdrop = clean;
 
       if (!alreadyCounted) {
-        OPS.totalAirdroppedUi =
-          (Number(OPS.totalAirdroppedUi) || 0) + Number(lastAirdrop.totalSentUi);
+        OPS.totalAirdroppedUi = (OPS.totalAirdroppedUi ?? 0) + clean.totalSentUi;
       }
     }
 
