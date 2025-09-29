@@ -1,36 +1,31 @@
 // src/lib/state.ts
 
-export type TxRef = {
-  at: string;
-  amount: number;
-  tx: string | null;
-  url?: string | null; // optional solscan URL
-};
+export type TxRef = { at: string; amount: number; tx: string | null };
 
 export type AirdropRef = {
-  at: string;
-  totalSentUi?: number;
-  count?: number;
-  cycleId?: string | null;
+  at: string;                // ISO string (required)
+  totalSentUi: number;       // total token amount sent in that airdrop (UI units)
+  count?: number;            // number of wallets in that airdrop
+  cycleId?: string;          // cycle id used by worker (dedupe)
 };
 
 export type OpsState = {
-  lastClaim: TxRef | null;
-  lastSwap: TxRef | null;
-  // NEW: used by FE + /api/admin/ops to show/accumulate totals
-  lastAirdrop?: AirdropRef | null;
-  totalAirdroppedUi?: number; // cumulative tokens airdropped across unique cycles
+  lastClaim: TxRef | null;         // latest SOL creator-fee claim (amount in SOL)
+  lastSwap:  TxRef | null;         // kept for compatibility; may be null
+  lastAirdrop: AirdropRef | null;  // latest airdrop meta (for “given away”)
+  totalAirdroppedUi: number;       // cumulative token airdropped (UI units)
 };
 
 export type Metrics = {
   cacheHits: number;
   cacheMisses: number;
-  lastRpcMs: number | null;
-  lastSnapshotAt: string | null;
+  lastRpcMs: number | null;      // last snapshot RPC latency in ms
+  lastSnapshotAt: string | null; // ISO timestamp of last fresh RPC
 };
 
+// (Optional) totals bucket if you want to track more later
 export type Totals = {
-  totalCoinAirdropped: number; // kept for compatibility
+  totalCoinAirdropped: number;   // deprecated; prefer OPS.totalAirdroppedUi
   totalSolDropped: number;
 };
 
@@ -60,13 +55,7 @@ if (!g.__BANANA_TOTALS__) {
   } as Totals;
 }
 
-// NEW: dedupe set for airdrop cycleIds so totals don't double-count
-if (!g.__AIRDROP_CYCLES__) {
-  g.__AIRDROP_CYCLES__ = new Set<string>();
-}
-
 // --------- exports consumed by API/worker/UI ---------
 export const OPS: OpsState = g.__BANANA_OPS__;
 export const METRICS: Metrics = g.__BANANA_METRICS__;
 export const TOTALS: Totals = g.__BANANA_TOTALS__;
-export const AIRDROP_CYCLES: Set<string> = g.__AIRDROP_CYCLES__;
