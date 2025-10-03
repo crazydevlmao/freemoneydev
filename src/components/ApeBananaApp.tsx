@@ -843,7 +843,7 @@ export default function CandyApp() {
 
       {/* Latest drop */}
       <div className="p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">Latest Drop (SOL)</div>
+        <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">Latest Claim (SOL)</div>
         <div className="mt-1 text-xl font-semibold">
           {lastDrop != null
             ? toNum((lastDrop as any).amount).toLocaleString(undefined, { maximumFractionDigits: 9 })
@@ -942,6 +942,7 @@ export default function CandyApp() {
     </div>
   );
 }
+
 
 
 
