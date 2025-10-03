@@ -9,7 +9,7 @@ import {
   sendAndConfirmTransaction,
   VersionedTransaction,
   LAMPORTS_PER_SOL,
-  ComputeBudgetProgram, // <— added
+  ComputeBudgetProgram, // <— added previously
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddressSync,
@@ -90,7 +90,7 @@ function nextTimes() {
   };
 }
 function looksRetryableMessage(msg: string) {
-  return /rate.?limit|429|timeout|temporar|connection|ECONNRESET|ETIMEDOUT|blockhash|Node is behind|Transaction was not confirmed|FetchError/i.test(msg);
+  return /rate.?limit|429|timeout|temporar|connection|ECONNRESET|ETIMEDOUT|blockhash|Node is behind|Transaction was not confirmed|FetchError|TLS|ENOTFOUND|EAI_AGAIN/i.test(msg);
 }
 async function withRetries<T>(fn: () => Promise<T>, attempts = 5, baseMs = 350): Promise<T> {
   let lastErr: any;
@@ -224,20 +224,46 @@ async function getMintDecimals(mintPk: PublicKey): Promise<number> {
 
 /* ================= Jupiter (quote + swap) ================= */
 const JUP_QUOTE = "https://quote-api.jup.ag/v6/quote";
-// robust swap hosts (primary + fallback)
+// robust swap hosts (primary + fallbacks)  // <<< changed
 const JUP_SWAP_HOSTS = [
+  "https://quote-api.jup.ag",
   "https://swap-api.jup.ag",
   "https://jup.ag",
 ];
 
-async function postJson(url: string, body: any) {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-  return r.json();
+// small helper with hard timeout (prevents hung fetches)  // <<< added
+async function fetchJsonWithTimeout(
+  url: string,
+  opts: RequestInit = {},
+  timeoutMs = 5000
+): Promise<any> {
+  const ac = new AbortController();
+  const id = setTimeout(() => ac.abort(new Error("timeout")), timeoutMs);
+  try {
+    const r = await fetch(url, {
+      ...opts,
+      headers: { Accept: "application/json", ...(opts.headers || {}) },
+      signal: ac.signal as any,
+    });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    return await r.json();
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// POST helper with timeout & retries  // <<< added
+async function postJson(url: string, body: any, timeoutMs = 7000) {
+  return await withRetries(
+    () =>
+      fetchJsonWithTimeout(
+        url,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+        timeoutMs
+      ),
+    3,
+    350
+  );
 }
 
 async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
@@ -249,16 +275,14 @@ async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippage
     `&amount=${amountLamports}` +
     `&slippageBps=${slippageBps}` +
     `&enableDexes=pump,meteora,raydium` +
-    `&onlyDirectRoutes=false`;
-  for (let i = 0; i < 3; i++) {
-    const r = await fetch(url);
-    if (r.ok) {
-      const j: any = await r.json();
-      if (j && j.routePlan?.length) return j;
-    }
-    await sleep(300 * (i + 1));
-  }
-  throw new Error("Jupiter quote failed");
+    `&onlyDirectRoutes=false` +
+    `&swapMode=ExactIn`; // <<< added (explicit)
+  // retry the quote 3x with a short backoff and a hard timeout  // <<< changed
+  return await withRetries(async () => {
+    const j: any = await fetchJsonWithTimeout(url, { cache: "no-store" }, 6000);
+    if (!j?.routePlan?.length) throw new Error("no route");
+    return j;
+  }, 3, 300);
 }
 
 async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
@@ -273,7 +297,8 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
   let lastErr: any = null;
   for (const host of JUP_SWAP_HOSTS) {
     try {
-      const jr: any = await withRetries(() => postJson(`${host}/v6/swap`, swapReq), 4, 300);
+      // try each host with retries & timeout  // <<< changed
+      const jr: any = await postJson(`${host}/v6/swap`, swapReq, 8000);
       const swapTransaction = jr.swapTransaction;
       const txBytes = Uint8Array.from(Buffer.from(swapTransaction, "base64"));
       const tx = VersionedTransaction.deserialize(txBytes);
@@ -343,7 +368,7 @@ async function triggerClaimAndSwap90() {
   const claimedSol = Math.max(0, deltaSol);
   console.log(`[CLAIM] delta=${claimedSol} SOL | ${claimUrl ?? "(no sig)"}`);
 
-  // 4) spend 90% of delta via Jupiter → your mint
+  // 4) spend 90% of delta via Jupiter → your mint (with broader slippage escalation)
   let swapSig: string | null = null;
   if (claimedSol > 0) {
     const reserve = 0.02; // keep fees
@@ -466,6 +491,9 @@ async function sendAirdropsAdaptive(
     const group = rows.slice(idx, end);
 
     const ixs: any[] = [];
+    // (optional safety) Ensure source ATA exists before first transfer (idempotent)
+    // ixs.push(createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mintPubkey));
+
     for (const r of group) {
       const recipient = new PublicKey(r.wallet);
       const toAta = getAssociatedTokenAddressSync(mintPubkey, recipient, false);
