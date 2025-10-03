@@ -222,11 +222,14 @@ async function getMintDecimals(mintPk: PublicKey): Promise<number> {
   return dec;
 }
 
-/* ================= Jupiter (quote + swap) ================= */
-// Use Jupiter LITE (no key) for both quote + swap
-const JUP_BASE = process.env.JUP_BASE || "https://jup.ag/api/v6";
+// ===== Jupiter (quote + swap) =====
+// Pick ONE: (free) lite-api OR (paid) api.jup.ag OR (legacy) quote-api
+const JUP_BASE = process.env.JUP_BASE 
+  || "https://lite-api.jup.ag/swap/v1"; // <-- default to the free host
+
 const JUP_QUOTE = `${JUP_BASE}/quote`;
 const JUP_SWAP  = `${JUP_BASE}/swap`;
+
 
 
 // small helper with hard timeout (prevents hung fetches)
@@ -615,4 +618,5 @@ loop().catch((err) => {
   console.error("bananaWorker crashed:", err);
   process.exit(1);
 });
+
 
