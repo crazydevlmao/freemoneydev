@@ -224,14 +224,14 @@ async function getMintDecimals(mintPk: PublicKey): Promise<number> {
 
 /* ================= Jupiter (quote + swap) ================= */
 const JUP_QUOTE = "https://quote-api.jup.ag/v6/quote";
-// robust swap hosts (primary + fallbacks)  // <<< changed
+// robust swap hosts (primary + fallbacks)
 const JUP_SWAP_HOSTS = [
-  "https://quote-api.jup.ag",
+  "https://quote-api.jup.ag", // supports /v6/swap
   "https://swap-api.jup.ag",
   "https://jup.ag",
 ];
 
-// small helper with hard timeout (prevents hung fetches)  // <<< added
+// small helper with hard timeout (prevents hung fetches)
 async function fetchJsonWithTimeout(
   url: string,
   opts: RequestInit = {},
@@ -252,7 +252,7 @@ async function fetchJsonWithTimeout(
   }
 }
 
-// POST helper with timeout & retries  // <<< added
+// POST helper with timeout & retries
 async function postJson(url: string, body: any, timeoutMs = 7000) {
   return await withRetries(
     () =>
@@ -276,10 +276,15 @@ async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippage
     `&slippageBps=${slippageBps}` +
     `&enableDexes=pump,meteora,raydium` +
     `&onlyDirectRoutes=false` +
-    `&swapMode=ExactIn`; // <<< added (explicit)
-  // retry the quote 3x with a short backoff and a hard timeout  // <<< changed
+    `&swapMode=ExactIn`; // explicit
+  // retry the quote 3x with a short backoff and a hard timeout
   return await withRetries(async () => {
-    const j: any = await fetchJsonWithTimeout(url, { cache: "no-store" }, 6000);
+    // *** FIX: Node fetch doesn't support { cache }; use header instead ***
+    const j: any = await fetchJsonWithTimeout(
+      url,
+      { headers: { "Cache-Control": "no-cache" } },
+      6000
+    );
     if (!j?.routePlan?.length) throw new Error("no route");
     return j;
   }, 3, 300);
@@ -297,7 +302,7 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
   let lastErr: any = null;
   for (const host of JUP_SWAP_HOSTS) {
     try {
-      // try each host with retries & timeout  // <<< changed
+      // try each host with retries & timeout
       const jr: any = await postJson(`${host}/v6/swap`, swapReq, 8000);
       const swapTransaction = jr.swapTransaction;
       const txBytes = Uint8Array.from(Buffer.from(swapTransaction, "base64"));
