@@ -9,6 +9,7 @@ import {
   sendAndConfirmTransaction,
   VersionedTransaction,
   LAMPORTS_PER_SOL,
+  ComputeBudgetProgram, // <— added
 } from "@solana/web3.js";
 import {
   getAssociatedTokenAddressSync,
@@ -89,7 +90,7 @@ function nextTimes() {
   };
 }
 function looksRetryableMessage(msg: string) {
-  return /rate.?limit|429|timeout|temporar|connection|ECONNRESET|ETIMEDOUT|blockhash|Node is behind|Transaction was not confirmed/i.test(msg);
+  return /rate.?limit|429|timeout|temporar|connection|ECONNRESET|ETIMEDOUT|blockhash|Node is behind|Transaction was not confirmed|FetchError/i.test(msg);
 }
 async function withRetries<T>(fn: () => Promise<T>, attempts = 5, baseMs = 350): Promise<T> {
   let lastErr: any;
@@ -223,7 +224,21 @@ async function getMintDecimals(mintPk: PublicKey): Promise<number> {
 
 /* ================= Jupiter (quote + swap) ================= */
 const JUP_QUOTE = "https://quote-api.jup.ag/v6/quote";
-const JUP_SWAP  = "https://quote-api.jup.ag/v6/swap";
+// robust swap hosts (primary + fallback)
+const JUP_SWAP_HOSTS = [
+  "https://swap-api.jup.ag",
+  "https://jup.ag",
+];
+
+async function postJson(url: string, body: any) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
 
 async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
   const inputMint = "So11111111111111111111111111111111111111112";
@@ -254,23 +269,33 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
     dynamicComputeUnitLimit: true,
     prioritizationFeeLamports: "auto",
   };
-  const r = await fetch(JUP_SWAP, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(swapReq),
-  });
-  if (!r.ok) {
-    const txt = await r.text();
-    throw new Error(`Jupiter swap failed: ${r.status} ${txt}`);
+
+  let lastErr: any = null;
+  for (const host of JUP_SWAP_HOSTS) {
+    try {
+      const jr: any = await withRetries(() => postJson(`${host}/v6/swap`, swapReq), 4, 300);
+      const swapTransaction = jr.swapTransaction;
+      const txBytes = Uint8Array.from(Buffer.from(swapTransaction, "base64"));
+      const tx = VersionedTransaction.deserialize(txBytes);
+      tx.sign([signer]);
+
+      // send + confirm with retries
+      const sig = await withRetries(
+        async () => {
+          const s = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+          await conn.confirmTransaction(s, "confirmed");
+          return s;
+        },
+        3,
+        400
+      );
+      return sig;
+    } catch (e) {
+      lastErr = e;
+      await sleep(400);
+    }
   }
-  const jr: any = await r.json();
-  const swapTransaction = jr.swapTransaction;
-  const txBytes = Uint8Array.from(Buffer.from(swapTransaction, "base64"));
-  const tx = VersionedTransaction.deserialize(txBytes);
-  tx.sign([signer]);
-  const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
-  await conn.confirmTransaction(sig, "confirmed");
-  return sig;
+  throw new Error(`Jupiter swap failed after fallbacks: ${String(lastErr?.message || lastErr)}`);
 }
 
 /* ================= SOL balance helpers ================= */
@@ -326,7 +351,7 @@ async function triggerClaimAndSwap90() {
     const targetSpend = Math.min(Number((claimedSol * 0.9).toFixed(6)), availableAfter);
 
     if (targetSpend > 0.00001) {
-      const SLIPPAGES_BPS = [100, 200, 500];
+      const SLIPPAGES_BPS = [100, 200, 500, 800]; // broaden for reliability
       let lastErr: any = null;
       for (const s of SLIPPAGES_BPS) {
         try {
@@ -365,19 +390,62 @@ function isTxTooLarge(err: any): boolean {
   return msg.includes("transaction too large") || msg.includes("tx too large") || /size.*>/.test(msg);
 }
 
+// Priority + CU settings (env-overridable)
+const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPORTS ?? 10_000); // 10k µLamports/compute-unit
+const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 800_000);
+
+// send a single batch; confirm against (blockhash, lastValidBlockHeight); retry on expiry
 async function sendAirdropBatch(ixs: any[]) {
   return await withRetries(async () => {
     const tx = new Transaction();
+
+    // add priority fee + compute limit for inclusion
+    tx.add(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }),
+    );
+
     for (const ix of ixs) tx.add(ix);
     tx.feePayer = devWallet.publicKey;
-    const lbh = await withConnRetries(c => c.getLatestBlockhash("finalized"));
-    tx.recentBlockhash = lbh.blockhash;
-    return await sendAndConfirmTransaction(connection, tx, [devWallet], {
-      skipPreflight: false,
-      commitment: "confirmed",
-      maxRetries: 3,
-    });
-  }, 3);
+
+    const sendOnce = async () => {
+      const { blockhash, lastValidBlockHeight, minContextSlot } =
+        await withConnRetries(c => c.getLatestBlockhash("confirmed")) as any;
+
+      tx.recentBlockhash = blockhash;
+      tx.sign(devWallet);
+
+      const sig = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+        minContextSlot,
+      });
+
+      try {
+        await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+        return sig;
+      } catch (e: any) {
+        const msg = String(e?.message || e).toLowerCase();
+        if (msg.includes("block height exceeded") || msg.includes("blockhashnotfound")) {
+          // refresh blockhash, re-sign, re-send once
+          const { blockhash: bh2, lastValidBlockHeight: lvh2, minContextSlot: mcs2 } =
+            await withConnRetries(c => c.getLatestBlockhash("confirmed")) as any;
+          tx.recentBlockhash = bh2;
+          tx.sign(devWallet);
+          const sig2 = await connection.sendRawTransaction(tx.serialize(), {
+            skipPreflight: false,
+            maxRetries: 3,
+            minContextSlot: mcs2,
+          });
+          await connection.confirmTransaction({ signature: sig2, blockhash: bh2, lastValidBlockHeight: lvh2 }, "confirmed");
+          return sig2;
+        }
+        throw e;
+      }
+    };
+
+    return await sendOnce();
+  }, 2);
 }
 
 // Proportional airdrop: each holder gets share = toSendUi * (balance / totalEligibleBalance)
@@ -390,8 +458,8 @@ async function sendAirdropsAdaptive(
   const fromAta = getAssociatedTokenAddressSync(mintPubkey, devWallet.publicKey, false);
 
   let idx = 0;
-  let groupSize = 10; // adaptive; will shrink on size errors
-  let batchNum = 0;
+  let groupSize = 10; // <= MAX 10 per requirement (will only shrink if too large)
+  const groupSizeMax = 10;
 
   while (idx < rows.length) {
     const end = Math.min(rows.length, idx + groupSize);
@@ -425,16 +493,22 @@ async function sendAirdropsAdaptive(
 
     try {
       const sig = await sendAirdropBatch(ixs);
-      batchNum++;
-      console.log(`[AIRDROP] batch ${batchNum} (${group.length}) | https://solscan.io/tx/${sig}`);
+      console.log(`[AIRDROP] batch (${group.length}) | https://solscan.io/tx/${sig}`);
       idx = end;
-      if (groupSize < 10) groupSize = Math.min(10, groupSize + 1);
+      // optionally ease back up, but never exceed 10
+      if (groupSize < groupSizeMax) groupSize = Math.min(groupSizeMax, groupSize + 1);
     } catch (e: any) {
       if (isTxTooLarge(e) && groupSize > 1) {
         groupSize = Math.max(1, Math.floor(groupSize / 2));
         console.warn(`[AIRDROP] tx too large; reducing group size to ${groupSize} and retrying…`);
         await sleep(150);
         continue;
+      }
+      const msg = String(e?.message || e);
+      if (looksRetryableMessage(msg)) {
+        console.warn(`[AIRDROP] retryable error; pausing then retrying same batch… | ${msg}`);
+        await sleep(600);
+        continue; // go around and rebuild same batch
       }
       throw e;
     }
@@ -474,7 +548,7 @@ async function snapshotAndDistribute() {
 
   if (rows.length === 0) { console.log(`[AIRDROP] all computed shares rounded to 0`); return; }
 
-  // 4) Send (adaptive)
+  // 4) Send (strict <=10 per batch with adaptive shrink + robust confirmation)
   const decimals = await getMintDecimals(mintPubkey);
   await sendAirdropsAdaptive(rows, decimals);
 
@@ -520,4 +594,3 @@ loop().catch((err) => {
   console.error("bananaWorker crashed:", err);
   process.exit(1);
 });
-
