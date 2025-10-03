@@ -74,7 +74,7 @@ const copyToClipboard = async (text: string) => {
 function CandyCompactTimer({
   msLeft,
   cycleMs,
-  maxWidth = 720, // clamp the whole timer width so it never feels too long
+  maxWidth = 720,
 }: {
   msLeft: number;
   cycleMs: number;
@@ -87,16 +87,35 @@ function CandyCompactTimer({
 
   const [logoBroken, setLogoBroken] = React.useState(false);
 
-  // Tight animated digit (white→grey gradient on the glyph itself)
+  // --- FREE $CANDY celebrate window (strict-mode safe) ---
+  const [celebrate, setCelebrate] = React.useState(false);
+  const prevMsRef = React.useRef(msLeft);
+
+  // detect reset: was near 0, now jumped to (almost) full cycle
+  useEffect(() => {
+    const prev = prevMsRef.current;
+    const resetDetected = prev <= 200 && msLeft >= cycleMs - 200;
+    if (resetDetected) setCelebrate(true);
+    prevMsRef.current = msLeft;
+  }, [msLeft, cycleMs]);
+
+  // ensure it ALWAYS returns to digits after 2s (even in StrictMode)
+  useEffect(() => {
+    if (!celebrate) return;
+    const t = setTimeout(() => setCelebrate(false), 2000);
+    return () => clearTimeout(t);
+  }, [celebrate]);
+
+  // digits
   const Digit = ({ ch }: { ch: string }) => (
-    <span className="inline-block min-w-[1.6ch] text-center align-baseline">
+    <span className="inline-block min-w-[1.55ch] text-center align-baseline">
       <AnimatePresence initial={false} mode="wait">
         <motion.span
           key={ch}
-          initial={{ y: 10, opacity: 0, filter: 'blur(4px)' }}
+          initial={{ y: 12, opacity: 0, filter: 'blur(6px)' }}
           animate={{ y: 0, opacity: 1, filter: 'blur(0px)' }}
-          exit={{ y: -10, opacity: 0, filter: 'blur(4px)' }}
-          transition={{ type: 'spring', stiffness: 550, damping: 32 }}
+          exit={{ y: -12, opacity: 0, filter: 'blur(6px)' }}
+          transition={{ type: 'spring', stiffness: 650, damping: 34 }}
           className="inline-block bg-gradient-to-b from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent"
         >
           {ch}
@@ -108,29 +127,54 @@ function CandyCompactTimer({
   const barWidthPct = progress * 100;
   const barWidth = `${barWidthPct}%`;
   const glowWidth = `${Math.max(8, barWidthPct)}%`;
+  const message = 'FREE $CANDY';
 
   return (
     <section className="relative z-30">
       <div className="mx-auto w-full" style={{ maxWidth }}>
-        {/* Digits (compact sizes + tight tracking) */}
-        <div className="px-4 pt-4">
+        <div className="px-4 pt-3">
           <div className="flex items-center justify-center">
-            <div className="font-mono font-extrabold leading-[0.9] tracking-tight text-4xl md:text-5xl lg:text-6xl">
-              <Digit ch={mm[0]} />
-              <Digit ch={mm[1]} />
-              {/* slim, non-animated colon so it doesn't feel “cute” */}
-              <span className="inline-block px-[0.15em] bg-gradient-to-b from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent">
-                :
-              </span>
-              <Digit ch={ss[0]} />
-              <Digit ch={ss[1]} />
+            <div className="font-mono font-extrabold leading-[0.9] tracking-tight text-[32px] md:text-[44px] lg:text-[56px]">
+              <AnimatePresence mode="wait">
+                {celebrate ? (
+                  <motion.span
+                    key="msg"
+                    initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -8, scale: 0.98 }}
+                    transition={{ duration: 0.35 }}
+                    className="inline-flex items-baseline gap-[0.12em]"
+                  >
+                    {message.split('').map((c, i) => (
+                      <motion.span
+                        key={`${c}-${i}`}
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: i * 0.03, type: 'spring', stiffness: 500, damping: 26 }}
+                        className="bg-gradient-to-b from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent"
+                      >
+                        {c}
+                      </motion.span>
+                    ))}
+                  </motion.span>
+                ) : (
+                  <motion.span key="digits" className="inline-block">
+                    <Digit ch={mm[0]} />
+                    <Digit ch={mm[1]} />
+                    <span className="inline-block px-[0.12em] bg-gradient-to-b from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent">
+                      :
+                    </span>
+                    <Digit ch={ss[0]} />
+                    <Digit ch={ss[1]} />
+                  </motion.span>
+                )}
+              </AnimatePresence>
             </div>
           </div>
 
-        {/* Progress bar (short, glowy, with logo pulse marker) */}
-          <div className="mt-3 relative">
+          {/* bar */}
+          <div className="mt-2.5 relative">
             <div className="relative h-2.5 w-full rounded-full bg-white/5 ring-1 ring-white/10 overflow-hidden">
-              {/* fill: orange → green towards the end */}
               <div
                 className="absolute left-0 top-0 h-full"
                 style={{
@@ -139,7 +183,6 @@ function CandyCompactTimer({
                     'linear-gradient(90deg, #FF8A00 0%, #FFB86C 35%, #FFD8A0 60%, #C8F7A6 85%, #66FF7F 100%)',
                 }}
               />
-              {/* soft glow following fill */}
               <div
                 className="absolute left-0 -top-2 -bottom-2 pointer-events-none"
                 style={{
@@ -151,14 +194,14 @@ function CandyCompactTimer({
               />
             </div>
 
-            {/* marker centered at current progress */}
+            {/* marker */}
             <div
               className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2"
               style={{ left: barWidth }}
             >
               <motion.div
-                animate={{ scale: [1, 1.12, 1], y: [0, -0.5, 0] }}
-                transition={{ duration: 1.05, repeat: Infinity, ease: 'easeInOut' }}
+                animate={{ scale: [1, 1.12, 1], y: [0, -0.6, 0] }}
+                transition={{ duration: 0.95, repeat: Infinity, ease: 'easeInOut' }}
                 className="h-7 w-7 md:h-8 md:w-8 rounded-full ring-2 ring-white/60 shadow-[0_0_14px_rgba(255,184,108,.55)] overflow-hidden bg-transparent grid place-items-center"
               >
                 {logoBroken ? (
@@ -177,13 +220,14 @@ function CandyCompactTimer({
             </div>
           </div>
 
-          {/* give breathing room under the bar so it doesn't crash into your sections */}
-          <div className="mb-8" />
+          <div className="mb-6" />
         </div>
       </div>
     </section>
   );
 }
+
+
 
 
 /** ======== localStorage (namespaced for candy) ======== */
@@ -285,6 +329,147 @@ function CandyBurst({ active }: { active: boolean }) {
     </div>
   );
 }
+function CandyRain({ active }: { active: boolean }) {
+  const [drops] = useState(() =>
+    Array.from({ length: 48 }).map(() => ({
+      id: Math.random().toString(36).slice(2),
+      x: Math.random() * 100,      // vw %
+      delay: Math.random() * 0.8,  // s
+      dur: 1.8 + Math.random() * 1.6, // s
+      size: 20 + Math.floor(Math.random() * 18), // px
+      sway: (Math.random() * 2 - 1) * 18,        // px side drift
+    }))
+  );
+  if (!active) return null;
+
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[5] overflow-hidden">
+      {drops.map((d) => (
+        <motion.div
+          key={d.id}
+          initial={{ x: `${d.x}vw`, y: '-12%', opacity: 0 }}
+          animate={{
+            // 4-keyframe path so opacity timing can match perfectly
+            x: [
+              `${d.x}vw`,
+              `calc(${d.x}vw + ${d.sway / 2}px)`,
+              `calc(${d.x}vw + ${d.sway}px)`,
+              `calc(${d.x}vw + ${d.sway}px)`,
+            ],
+            y: ['-12%', '0%', '100%', '112%'],     // passes the bottom
+            opacity: [0, 1, 1, 0],                 // only fade at the end
+          }}
+          transition={{
+            duration: d.dur,
+            delay: d.delay,
+            repeat: Infinity,
+            ease: 'linear',
+            times: [0, 0.07, 0.93, 1],            // visible from ~7%→93%
+          }}
+          className="absolute will-change-transform"
+          style={{ width: d.size, height: d.size }}
+        >
+          <Image src="/logo.png" alt="candy" width={d.size} height={d.size} className="opacity-90" />
+        </motion.div>
+      ))}
+    </div>
+  );
+}
+
+function CandyAudio() {
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
+
+  // Default: sound ON. Persist user preference across refreshes.
+  const [muted, setMuted] = React.useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("candy_music_muted") === "1";
+  });
+  const [blocked, setBlocked] = React.useState(false);
+
+  // Keep element muted state + preference in sync
+  React.useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.muted = muted;
+    localStorage.setItem("candy_music_muted", muted ? "1" : "0");
+  }, [muted]);
+
+  // Try autoplay once; if blocked, unlock on first user interaction
+  React.useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+
+    el.loop = true;
+    el.preload = "auto";
+    el.volume = 0.4; // tweak loudness
+    // attributes on the element also help on iOS:
+    // <audio autoPlay playsInline ... />
+
+    let cleaned = false;
+
+    const tryPlay = async () => {
+      try {
+        await el.play();
+        setBlocked(false);
+      } catch {
+        setBlocked(true);
+        attachUnlock();
+      }
+    };
+
+    const unlock = async () => {
+      try {
+        await el.play();
+        setBlocked(false);
+        detachUnlock();
+      } catch {
+        /* still blocked until a proper gesture */
+      }
+    };
+
+    const onPointer = () => unlock();
+    const onKey = () => unlock();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") unlock();
+    };
+
+    const attachUnlock = () => {
+      window.addEventListener("pointerdown", onPointer, { once: true });
+      window.addEventListener("keydown", onKey, { once: true });
+      document.addEventListener("visibilitychange", onVisible);
+    };
+
+    const detachUnlock = () => {
+      if (cleaned) return;
+      window.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("visibilitychange", onVisible);
+      cleaned = true;
+    };
+
+    tryPlay();
+    return detachUnlock;
+  }, []);
+
+  return (
+    <>
+      {/* Plays unmuted by default; loops forever. If blocked, we show a prompt. */}
+      <audio ref={audioRef} src="/music.mp3" autoPlay playsInline />
+
+      <button
+        onClick={() => setMuted((m) => !m)}
+        className="fixed bottom-4 right-4 z-40 px-3 py-2 rounded-xl bg-white/10 ring-1 ring-white/20 hover:ring-white/40 backdrop-blur text-sm"
+        title={muted ? "Unmute" : "Mute"}
+        aria-pressed={muted}
+      >
+        {blocked ? "🔇 Tap to enable" : muted ? "🔇 Music Off" : "🔊 Music On"}
+      </button>
+    </>
+  );
+}
+
+
+
 
 /** ================== MAIN ================== */
 export default function CandyApp() {
@@ -400,7 +585,7 @@ export default function CandyApp() {
   // Paging & search
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
-  const pageSize = 24; // cards grid
+  const pageSize = 10; // cards grid
   const filtered = useMemo(() => enriched.rows.filter((r) => (q ? r.wallet.toLowerCase().includes(q.toLowerCase()) : true)), [enriched.rows, q]);
   useEffect(() => setPage(1), [q]);
   const maxPage = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -446,7 +631,8 @@ export default function CandyApp() {
         <div className="absolute inset-0 [background:radial-gradient(60%_40%_at_70%_10%,rgba(168,85,247,0.18),transparent),radial-gradient(40%_30%_at_0%_100%,rgba(249,115,22,0.15),transparent)]" />
         <div className="absolute inset-0 [background-image:linear-gradient(rgba(255,149,0,0.04)_1px,transparent_1px),linear-gradient(90deg,rgba(255,149,0,0.04)_1px,transparent_1px)] bg-[length:36px_36px]" />
       </div>
-
+{/* Rain layer behind content */}
+<CandyRain active={msLeft <= 5000} />
       {/* === TOP BAR === */}
       <header className="relative z-20 w-full">
         <div className="mx-auto max-w-7xl px-4 py-3 grid grid-cols-12 items-center gap-3">
@@ -505,115 +691,207 @@ export default function CandyApp() {
       )}
 
       {/* === BODY LAYOUT: 3 columns (Sidebar / Machine + Stats / Transparency) === */}
-      <main className={`relative z-10 mx-auto max-w-7xl px-4 pb-16 w-full flex-1 transition duration-500 ${gateOpen ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
-        <div className="grid grid-cols-12 gap-6">
-          {/* LEFT SIDEBAR: Milestones + Growth */}
-          <section className="col-span-12 lg:col-span-4 flex flex-col gap-6">
-            {/* Milestones */}
-            <div className="relative p-4 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
-              <CandyBurst active={burstHold} />
-              <CandyBurst active={burstMc} />
-              <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-400">Milestones</div>
-              <div className="mt-2 text-sm text-zinc-300">Holders <span className="font-semibold text-white">{holdersCount.toLocaleString()}</span> → <span className="font-semibold text-white">{nextHoldersTarget.toLocaleString()}</span></div>
-              <div className="mt-2 h-2 w-full rounded-full bg-white/10 overflow-hidden"><div className="h-full bg-gradient-to-r from-pink-400 via-orange-400 to-violet-400" style={{ width: `${holdersPct}%` }} /></div>
-              <div className="mt-4 text-sm text-zinc-300">Market cap <span className="font-semibold text-white">{market.marketCapUsd == null ? '--' : `$${Number(mc).toLocaleString()}`}</span> → <span className="font-semibold text-white">${mcTarget.toLocaleString()}</span></div>
-              <div className="mt-2 h-2 w-full rounded-full bg-white/10 overflow-hidden"><div className="h-full bg-gradient-to-r from-pink-400 via-orange-400 to-violet-400" style={{ width: `${mcPct}%` }} /></div>
-            </div>
-            {/* Growth */}
-            <div className="p-4 rounded-2xl border border-white/10 bg-white/5">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-medium tracking-wide text-zinc-200">Holders Growth</div>
-                <div className="flex items-center gap-1">
-                  {(['1H','1D','1W','1M','1Y','YTD','ALL'] as const).map((k) => (
-                    <button key={k} onClick={()=>setRange(k)} className={`px-2.5 py-1 rounded-lg text-[11px] border ${range===k? 'border-orange-400/70 bg-orange-400/10':'border-white/10 bg-white/5'}`}>{k}</button>
-                  ))}
-                </div>
-              </div>
-              <HoldersGrowthChart data={rangedGrowth} />
-            </div>
-          </section>
+      <main
+  className={`relative z-10 mx-auto max-w-7xl px-4 pb-16 w-full flex-1 transition duration-500 ${
+    gateOpen ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'
+  }`}
+>
+  <div className="grid grid-cols-12 gap-6">
+    {/* LEFT COLUMN: Milestones then Holders */}
+    <section className="col-span-12 lg:col-span-5 flex flex-col gap-6">
+      {/* Milestones */}
+      <div className="relative p-4 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
+        <CandyBurst active={burstHold} />
+        <CandyBurst active={burstMc} />
+        <div className="text-[11px] uppercase tracking-[0.2em] text-zinc-400">Milestones</div>
 
-          {/* CENTER: Candy Machine stats tiles */}
-          <section className="col-span-12 lg:col-span-5 flex flex-col gap-6">
-            {/* Snapshot bar */}
-            <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md flex items-center justify-between gap-3">
-              <div className="text-sm text-zinc-300">Latest snapshot {updatedAt ? `@ ${new Date(updatedAt).toLocaleTimeString()}` : ''}</div>
-              <button onClick={handleDownloadSnapshot} className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-sm ring-1 ring-white/10 hover:ring-white/30">Download List</button>
-            </div>
-            {/* 2x2 tiles */}
-            <div className="grid grid-cols-2 gap-4">
-              {[
-                { k: 'Market Cap', v: market.marketCapUsd == null ? '--' : `$${compact(Math.max(0, market.marketCapUsd))}` },
-                { k: '$CANDY available', v: coinHoldingsTokens == null ? '--' : Math.floor(coinHoldingsTokens).toLocaleString() },
-                { k: '$CANDY given away', v: totalCoinAirdropped == null ? '--' : Math.floor(totalCoinAirdropped).toLocaleString(), sub: droppedValueUsd!=null?`≈ $${droppedValueUsd.toLocaleString()} USD`:undefined },
-              ].map((t) => (
-                <div key={t.k} className="p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
-                  <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">{t.k}</div>
-                  <div className="mt-1 text-2xl font-semibold">{t.v}</div>
-                  {t.sub && <div className="mt-1 text-[11px] text-zinc-400">{t.sub}</div>}
-                </div>
-              ))}
-            </div>
-            {/* Latest drop card */}
-            <div className="p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">Latest Drop (SOL)</div>
-              <div className="mt-1 text-xl font-semibold">{lastDrop != null ? toNum((lastDrop as any).amount).toLocaleString(undefined, { maximumFractionDigits: 9 }) : '--'}</div>
-              <div className="mt-1 text-[11px] text-zinc-400">
-                {lastDrop?.tx || (lastDrop as any)?.url ? (
-                  <a className="underline decoration-zinc-500/50 hover:decoration-white" href={(lastDrop as any)?.url ?? solscanTx((lastDrop as any)?.tx)!} target="_blank" rel="noreferrer">View on Solscan</a>
-                ) : (
-                  'No tx yet'
-                )}
-                {lastDrop?.at && <span className="opacity-70"> • {new Date(lastDrop.at).toLocaleTimeString()}</span>}
-              </div>
-            </div>
-          </section>
-
-          {/* RIGHT: Transparency + Search */}
-          <section className="col-span-12 lg:col-span-3 flex flex-col gap-6">
-            {/* Transparency mini feed */}
-            <div className="p-4 rounded-2xl border border-white/10 bg-white/5">
-              <div className="text-sm font-semibold mb-2">Transparency</div>
-              <ul className="space-y-2 text-sm text-zinc-300">
-                <li>Last claim: <span className="font-mono">{ops?.lastClaim?.at ? new Date(ops.lastClaim.at).toLocaleTimeString() : '—'}</span> {ops?.lastClaim?.tx || ops?.lastClaim?.url ? (<a className="ml-1 underline" target="_blank" rel="noreferrer" href={(ops.lastClaim as any)?.url ?? solscanTx((ops.lastClaim as any)?.tx)!}>tx</a>) : null}</li>
-                <li>Last swap: <span className="font-mono">{ops?.lastSwap?.at ? new Date(ops.lastSwap.at).toLocaleTimeString() : '—'}</span> {ops?.lastSwap?.tx || ops?.lastSwap?.url ? (<a className="ml-1 underline" target="_blank" rel="noreferrer" href={(ops.lastSwap as any)?.url ?? solscanTx((ops.lastSwap as any)?.tx)!}>tx</a>) : null}</li>
-                <li>Total airdropped: <span className="font-semibold">{(ops?.totalAirdroppedUi ?? totalCoinAirdropped ?? 0).toLocaleString()}</span></li>
-              </ul>
-            </div>
-            {/* Holders search */}
-            <div className="p-4 rounded-2xl border border-white/10 bg-white/5">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="text-sm font-medium tracking-wide text-zinc-200">Holders</div>
-                <input placeholder="Search wallet…" value={q} onChange={(e)=>setQ(e.target.value)} className="h-9 w-44 rounded-lg border border-white/10 bg-[#150b1e] px-3 text-sm outline-none placeholder:text-zinc-500 focus:border-white/20" />
-              </div>
-              {/* Cards grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {holders === null && <div className="col-span-full text-center text-sm text-zinc-400 py-6">Loading…</div>}
-                {holders !== null && pageRows.length === 0 && <div className="col-span-full text-center text-sm text-zinc-400 py-6">No matches.</div>}
-                {holders !== null && pageRows.map((r) => (
-                  <div key={r.wallet} className="rounded-xl border border-white/10 bg-[#150b1e] p-3">
-                    <div className="flex items-center gap-2">
-                      <div className="h-7 w-7 rounded-full bg-white/10 grid place-items-center font-mono text-[10px]">{shortAddr(r.wallet,4,4).slice(0,2)}</div>
-                      <div className="flex-1">
-                        <div className="font-mono text-xs">{shortAddr(r.wallet)}</div>
-                        <div className="text-[11px] text-zinc-400">{r.tokens.toLocaleString()} tokens</div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-3 flex items-center justify-between text-[12px] text-zinc-400">
-                
-                <div className="flex items-center gap-2">
-                  {['First','Prev','Next','Last'].map((label)=> (
-                    <button key={label} onClick={()=>{ if(label==='First') setPage(1); if(label==='Prev') setPage((p)=>Math.max(1,p-1)); if(label==='Next') setPage((p)=>Math.min(maxPage,p+1)); if(label==='Last') setPage(maxPage); }} className="h-8 px-3 rounded-lg bg-white/10 ring-1 ring-white/10 hover:ring-white/30">{label}</button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </section>
+        {/* Holders */}
+        <div className="mt-2 text-sm text-zinc-300">
+          Holders <span className="font-semibold text-white">{holdersCount.toLocaleString()}</span> →
+          <span className="font-semibold text-white"> {nextHoldersTarget.toLocaleString()}</span>
         </div>
-      </main>
+        <div className="mt-2 h-2 w-full rounded-full bg-white/10 overflow-hidden">
+          <div
+            className="h-full bg-gradient-to-r from-pink-400 via-orange-400 to-violet-400"
+            style={{ width: `${holdersPct}%` }}
+          />
+        </div>
+
+        {/* Market cap */}
+        <div className="mt-4 text-sm text-zinc-300">
+          Market cap{' '}
+          <span className="font-semibold text-white">
+            {market.marketCapUsd == null ? '--' : `$${Number(mc).toLocaleString()}`}
+          </span>{' '}
+          → <span className="font-semibold text-white">${mcTarget.toLocaleString()}</span>
+        </div>
+        <div className="mt-2 h-2 w-full rounded-full bg-white/10 overflow-hidden">
+          <div
+            className="h-full bg-gradient-to-r from-pink-400 via-orange-400 to-violet-400"
+            style={{ width: `${mcPct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Holders list (10 per page) */}
+      <div className="p-4 rounded-2xl border border-white/10 bg-white/5">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="text-sm font-medium tracking-wide text-zinc-200">Holders</div>
+          <input
+            placeholder="Search wallet…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="h-9 w-44 rounded-lg border border-white/10 bg-[#150b1e] px-3 text-sm outline-none placeholder:text-zinc-500 focus:border-white/20"
+          />
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 gap-3">
+          {holders === null && (
+            <div className="col-span-full text-center text-sm text-zinc-400 py-6">Loading…</div>
+          )}
+          {holders !== null && pageRows.length === 0 && (
+            <div className="col-span-full text-center text-sm text-zinc-400 py-6">No matches.</div>
+          )}
+          {holders !== null &&
+            pageRows.map((r) => (
+              <div key={r.wallet} className="rounded-xl border border-white/10 bg-[#150b1e] p-3">
+                <div className="flex items-center gap-2">
+                  <div className="h-7 w-7 rounded-full bg-white/10 grid place-items-center font-mono text-[10px]">
+                    {shortAddr(r.wallet, 4, 4).slice(0, 2)}
+                  </div>
+                  <div className="flex-1">
+                    <div className="font-mono text-xs">{shortAddr(r.wallet)}</div>
+                    <div className="text-[11px] text-zinc-400">{r.tokens.toLocaleString()} tokens</div>
+                  </div>
+                  <button
+                    onClick={() => copyToClipboard(r.wallet)}
+                    className="text-xs text-zinc-300 hover:text-white"
+                    title="Copy address"
+                  >
+                    ⧉
+                  </button>
+                </div>
+              </div>
+            ))}
+        </div>
+
+        <div className="mt-3 flex items-center justify-end text-[12px] text-zinc-400">
+          <div className="flex items-center gap-2">
+            {['First', 'Prev', 'Next', 'Last'].map((label) => (
+              <button
+                key={label}
+                onClick={() => {
+                  if (label === 'First') setPage(1);
+                  if (label === 'Prev') setPage((p) => Math.max(1, p - 1));
+                  if (label === 'Next') setPage((p) => Math.min(maxPage, p + 1));
+                  if (label === 'Last') setPage(maxPage);
+                }}
+                className="h-8 px-3 rounded-lg bg-white/10 ring-1 ring-white/10 hover:ring-white/30"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    {/* RIGHT COLUMN: Snapshot + Stats + Latest Drop + Growth */}
+    <section className="col-span-12 lg:col-span-7 flex flex-col gap-6">
+      {/* Snapshot bar */}
+      <div className="p-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md flex items-center justify-between gap-3">
+        <div className="text-sm text-zinc-300">
+          Latest snapshot {updatedAt ? `@ ${new Date(updatedAt).toLocaleTimeString()}` : ''}
+        </div>
+        <button
+          onClick={handleDownloadSnapshot}
+          className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-sm ring-1 ring-white/10 hover:ring-white/30"
+        >
+          Download List
+        </button>
+      </div>
+
+      {/* Stat tiles: Market Cap wide on top, two tiles below */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* Market Cap (full width) */}
+        <div className="sm:col-span-2 p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">Market Cap</div>
+          <div className="mt-1 text-3xl md:text-4xl font-semibold">
+            {market.marketCapUsd == null ? '--' : `$${compact(Math.max(0, market.marketCapUsd))}`}
+          </div>
+        </div>
+
+        {/* $CANDY available */}
+        <div className="p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">$CANDY available</div>
+          <div className="mt-1 text-2xl font-semibold">
+            {coinHoldingsTokens == null ? '--' : Math.floor(coinHoldingsTokens).toLocaleString()}
+          </div>
+        </div>
+
+        {/* $CANDY given away */}
+        <div className="p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">$CANDY given away</div>
+          <div className="mt-1 text-2xl font-semibold">
+            {totalCoinAirdropped == null ? '--' : Math.floor(totalCoinAirdropped).toLocaleString()}
+          </div>
+          {droppedValueUsd != null && (
+            <div className="mt-1 text-[11px] text-zinc-400">≈ ${droppedValueUsd.toLocaleString()} USD</div>
+          )}
+        </div>
+      </div>
+
+      {/* Latest drop */}
+      <div className="p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
+        <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">Latest Drop (SOL)</div>
+        <div className="mt-1 text-xl font-semibold">
+          {lastDrop != null
+            ? toNum((lastDrop as any).amount).toLocaleString(undefined, { maximumFractionDigits: 9 })
+            : '--'}
+        </div>
+        <div className="mt-1 text-[11px] text-zinc-400">
+          {lastDrop?.tx || (lastDrop as any)?.url ? (
+            <a
+              className="underline decoration-zinc-500/50 hover:decoration-white"
+              href={(lastDrop as any)?.url ?? solscanTx((lastDrop as any)?.tx)!}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View on Solscan
+            </a>
+          ) : (
+            'No tx yet'
+          )}
+          {lastDrop?.at && (
+            <span className="opacity-70"> • {new Date(lastDrop.at).toLocaleTimeString()}</span>
+          )}
+        </div>
+      </div>
+
+      {/* Holders Growth (moved under right column) */}
+      <div className="p-4 rounded-2xl border border-white/10 bg-white/5">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-sm font-medium tracking-wide text-zinc-200">Holders Growth</div>
+          <div className="flex items-center gap-1">
+            {(['1H', '1D', '1W', '1M', '1Y', 'YTD', 'ALL'] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => setRange(k)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] border ${
+                  range === k ? 'border-orange-400/70 bg-orange-400/10' : 'border-white/10 bg-white/5'
+                }`}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+        </div>
+        <HoldersGrowthChart data={rangedGrowth} />
+      </div>
+    </section>
+  </div>
+</main>
+
 
       {/* === FOOTER === */}
       <footer className="relative z-10 border-t border-white/10 bg-black/20 w-full mt-auto">
@@ -657,6 +935,7 @@ export default function CandyApp() {
           </motion.div>
         )}
       </AnimatePresence>
+<CandyAudio />
 
       {/* Hide native cursor on pointer-fine */}
       <style>{`.candy-hide-cursor * { cursor: none !important }`}</style>
