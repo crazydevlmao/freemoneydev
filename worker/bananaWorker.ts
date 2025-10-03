@@ -223,13 +223,10 @@ async function getMintDecimals(mintPk: PublicKey): Promise<number> {
 }
 
 /* ================= Jupiter (quote + swap) ================= */
-const JUP_QUOTE = "https://quote-api.jup.ag/v6/quote";
-// robust swap hosts (primary + fallbacks)
-const JUP_SWAP_HOSTS = [
-  "https://quote-api.jup.ag", // supports /v6/swap
-  "https://swap-api.jup.ag",
-  "https://jup.ag",
-];
+// Use Jupiter LITE (no key) for both quote + swap
+const JUP_BASE = process.env.JUP_BASE || "https://lite-api.jup.ag";
+const JUP_QUOTE = `${JUP_BASE}/v6/quote`;
+const JUP_SWAP  = `${JUP_BASE}/v6/swap`;
 
 // small helper with hard timeout (prevents hung fetches)
 async function fetchJsonWithTimeout(
@@ -279,7 +276,6 @@ async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippage
     `&swapMode=ExactIn`; // explicit
   // retry the quote 3x with a short backoff and a hard timeout
   return await withRetries(async () => {
-    // *** FIX: Node fetch doesn't support { cache }; use header instead ***
     const j: any = await fetchJsonWithTimeout(
       url,
       { headers: { "Cache-Control": "no-cache" } },
@@ -299,33 +295,24 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
     prioritizationFeeLamports: "auto",
   };
 
-  let lastErr: any = null;
-  for (const host of JUP_SWAP_HOSTS) {
-    try {
-      // try each host with retries & timeout
-      const jr: any = await postJson(`${host}/v6/swap`, swapReq, 8000);
-      const swapTransaction = jr.swapTransaction;
-      const txBytes = Uint8Array.from(Buffer.from(swapTransaction, "base64"));
-      const tx = VersionedTransaction.deserialize(txBytes);
-      tx.sign([signer]);
+  // Single LITE endpoint with retries
+  const jr: any = await postJson(JUP_SWAP, swapReq, 8000);
+  const swapTransaction = jr.swapTransaction;
+  const txBytes = Uint8Array.from(Buffer.from(swapTransaction, "base64"));
+  const tx = VersionedTransaction.deserialize(txBytes);
+  tx.sign([signer]);
 
-      // send + confirm with retries
-      const sig = await withRetries(
-        async () => {
-          const s = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
-          await conn.confirmTransaction(s, "confirmed");
-          return s;
-        },
-        3,
-        400
-      );
-      return sig;
-    } catch (e) {
-      lastErr = e;
-      await sleep(400);
-    }
-  }
-  throw new Error(`Jupiter swap failed after fallbacks: ${String(lastErr?.message || lastErr)}`);
+  // send + confirm with retries
+  const sig = await withRetries(
+    async () => {
+      const s = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+      await conn.confirmTransaction(s, "confirmed");
+      return s;
+    },
+    3,
+    400
+  );
+  return sig;
 }
 
 /* ================= SOL balance helpers ================= */
