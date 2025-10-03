@@ -492,7 +492,7 @@ async function sendAirdropsAdaptive(
 
     for (const r of group) {
       const recipient = new PublicKey(r.wallet);
-      const toAta = getAssociatedTokenAddressSync(mintPubkey, recipient, false);
+      const toAta = getAssociatedTokenAddressSync(mintPubkey, recipient, true);
 
       ixs.push(
         createAssociatedTokenAccountIdempotentInstruction(
@@ -618,5 +618,6 @@ loop().catch((err) => {
   console.error("bananaWorker crashed:", err);
   process.exit(1);
 });
+
 
 
