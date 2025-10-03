@@ -655,7 +655,7 @@ export default function CandyApp() {
           </div>
           {/* Right controls */}
           <div className="col-span-12 sm:col-span-4 order-3 flex justify-end items-center gap-2">
-            <a href="https://x.com/" target="_blank" rel="noreferrer" className="px-3 py-1.5 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-[11px]">𝕏</a>
+            <a href="https://x.com/i/communities/1974016347811041606" target="_blank" rel="noreferrer" className="px-3 py-1.5 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-[11px]">𝕏</a>
             <button onClick={()=>setHowOpen(true)} className="px-3 py-1.5 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-[11px]">How it works</button>
       
           </div>
@@ -942,5 +942,6 @@ export default function CandyApp() {
     </div>
   );
 }
+
 
 
