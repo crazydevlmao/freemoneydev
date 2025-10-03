@@ -491,29 +491,44 @@ async function sendAirdropsAdaptive(
     // ixs.push(createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mintPubkey));
 
     for (const r of group) {
-      const recipient = new PublicKey(r.wallet);
-      const toAta = getAssociatedTokenAddressSync(mintPubkey, recipient, true);
+  // 1) Parse recipient pubkey safely
+  let recipient: PublicKey;
+  try {
+    recipient = new PublicKey(r.wallet);
+  } catch (e) {
+    console.warn(`[AIRDROP] skip invalid pubkey: ${r.wallet} | ${e}`);
+    continue; // don't stall the whole batch
+  }
 
-      ixs.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          devWallet.publicKey, toAta, recipient, mintPubkey
-        )
-      );
+  // 2) Derive recipient ATA; allow off-curve; skip on failure
+  let toAta: PublicKey;
+  try {
+    toAta = getAssociatedTokenAddressSync(mintPubkey, recipient, true); // allowOwnerOffCurve = true
+  } catch (e) {
+    console.warn(`[AIRDROP] skip recipient ${recipient.toBase58()} (ATA derivation failed) | ${e}`);
+    continue;
+  }
 
-      const amountBase = uiToBase(r.amountUi);
-      if (amountBase > BigInt(0)) {
-        ixs.push(
-          createTransferCheckedInstruction(
-            fromAta,
-            mintPubkey,
-            toAta,
-            devWallet.publicKey,
-            amountBase,
-            decimals
-          )
-        );
-      }
-    }
+  // 3) Amount check
+  const amountBase = uiToBase(r.amountUi);
+  if (amountBase <= 0n) continue;
+
+  // 4) Build ixs
+  ixs.push(
+    createAssociatedTokenAccountIdempotentInstruction(
+      devWallet.publicKey, toAta, recipient, mintPubkey
+    ),
+    createTransferCheckedInstruction(
+      fromAta,
+      mintPubkey,
+      toAta,
+      devWallet.publicKey,
+      amountBase,
+      decimals
+    )
+  );
+}
+
 
     try {
       const sig = await sendAirdropBatch(ixs);
@@ -618,6 +633,7 @@ loop().catch((err) => {
   console.error("bananaWorker crashed:", err);
   process.exit(1);
 });
+
 
 
 
