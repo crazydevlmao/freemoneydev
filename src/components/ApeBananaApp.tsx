@@ -585,7 +585,7 @@ export default function CandyApp() {
   // Paging & search
   const [q, setQ] = useState('');
   const [page, setPage] = useState(1);
-  const pageSize = 10; // cards grid
+  const pageSize = 9; // cards grid
   const filtered = useMemo(() => enriched.rows.filter((r) => (q ? r.wallet.toLowerCase().includes(q.toLowerCase()) : true)), [enriched.rows, q]);
   useEffect(() => setPage(1), [q]);
   const maxPage = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -942,3 +942,4 @@ export default function CandyApp() {
     </div>
   );
 }
+
