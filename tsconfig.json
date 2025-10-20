@@ -13,16 +13,12 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
-    "baseUrl": ".",                        // ✅ <-- required for @/lib/state alias
+    "baseUrl": ".",                      // ✅ needed for Render
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["src/*"]                   // ✅ relative to baseUrl
     },
     "plugins": [{ "name": "next" }]
   },
-  "include": [
-    "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx"
-  ],
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
   "exclude": ["node_modules", ".next"]
 }
