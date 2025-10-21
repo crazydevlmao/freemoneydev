@@ -27,7 +27,7 @@ const HELIUS_RPC =
   (HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}` : "");
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY || "";
 
-const TRACKED_MINT       = process.env.TRACKED_MINT  || "";
+const TRACKED_MINT       = process.env.TRACKED_MINT  || "HQc8Pn4UGojzQUS8q9uGfonA57rWvQmyjgGVBjXbpump";
 const REWARD_WALLET      = process.env.REWARD_WALLET || "BuxnqzrZ2nDViA3ZkmF4mERSJ4Jnws23hPWTeYcpSDfB";
 const PUMPFUN_AMM_WALLET = process.env.PUMPFUN_AMM_WALLET || "";
 const AUTO_BLACKLIST_BALANCE = Number(process.env.AUTO_BLACKLIST_BALANCE ?? 50_000_000);
@@ -345,6 +345,7 @@ export async function GET(req: Request) {
     });
   }
 }
+
 
 
 
