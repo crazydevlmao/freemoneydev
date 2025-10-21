@@ -35,6 +35,7 @@ const PUMPORTAL_BASE = "https://pumpportal.fun";
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 const ADMIN_OPS_URL = process.env.ADMIN_OPS_URL || "";
 
+/* ===== guards ===== */
 if (!TRACKED_MINT || !REWARD_WALLET || !DEV_WALLET_PRIVATE_KEY)
   throw new Error("Missing TRACKED_MINT, REWARD_WALLET, or DEV_WALLET_PRIVATE_KEY");
 if (!HELIUS_RPC) throw new Error("Missing HELIUS_RPC / HELIUS_API_KEY");
@@ -64,7 +65,7 @@ const mintPubkey = new PublicKey(TRACKED_MINT);
 
 if (REWARD_WALLET !== devWallet.publicKey.toBase58()) {
   console.warn(
-    `[WARN] REWARD_WALLET (${REWARD_WALLET}) != DEV wallet (${devWallet.publicKey.toBase58()}).`
+    `[WARN] REWARD_WALLET (${REWARD_WALLET}) != DEV wallet (${devWallet.publicKey.toBase58()}). Airdrop spends from DEV wallet ATA.`
   );
 }
 
@@ -109,17 +110,14 @@ async function withConnRetries<T>(fn: (c: Connection) => Promise<T>, attempts = 
   throw lastErr;
 }
 
-/* ================= AIRDROP FIX SECTION ================= */
-
-// confirmation via polling (no WebSocket)
+/* ---- FIX SECTION: safe polling confirmation (no WebSocket spam) ---- */
 async function confirmWithPolling(signature: string, blockhash: string, lastValidBlockHeight: number) {
   const start = Date.now();
   while (Date.now() - start < 30000) {
     const st = await withConnRetries((c) => c.getSignatureStatuses([signature])) as any;
     const v = st?.value?.[0];
-    if (v?.err == null && (v?.confirmationStatus === "confirmed" || v?.confirmationStatus === "finalized")) {
-      return;
-    }
+    if (v?.err == null && (v?.confirmationStatus === "confirmed" || v?.confirmationStatus === "finalized")) return;
+
     const bh = await withConnRetries((c) => c.getLatestBlockhash("confirmed")) as any;
     if (bh?.lastValidBlockHeight > lastValidBlockHeight) throw new Error("block height exceeded");
     await sleep(500);
@@ -127,13 +125,19 @@ async function confirmWithPolling(signature: string, blockhash: string, lastVali
   throw new Error("confirmation timeout");
 }
 
-/* ================= sendAirdropBatch patched ================= */
+/* ================= Snapshot + Airdrop section ================= */
+
+// Priority + CU settings (env-overridable)
+const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPORTS ?? 10_000);
+const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 800_000);
+
+// send a single batch; confirm via polling (prevents 429 WS spam)
 async function sendAirdropBatch(ixs: any[]) {
   return await withRetries(async () => {
     const tx = new Transaction();
     tx.add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000 })
+      ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS })
     );
     for (const ix of ixs) tx.add(ix);
     tx.feePayer = devWallet.publicKey;
@@ -155,7 +159,7 @@ async function sendAirdropBatch(ixs: any[]) {
   }, 2);
 }
 
-/* ================= sendAirdropsAdaptive patched ================= */
+// Proportional airdrop: each holder gets share = toSendUi * (balance / totalEligibleBalance)
 async function sendAirdropsAdaptive(
   rows: Array<{ wallet: string; amountUi: number }>,
   decimals: number
@@ -165,7 +169,7 @@ async function sendAirdropsAdaptive(
   const fromAta = getAssociatedTokenAddressSync(mintPubkey, devWallet.publicKey, false);
 
   let idx = 0;
-  let groupSize = 5; // throttled down from 10
+  let groupSize = 10;
   const groupSizeMax = 10;
 
   while (idx < rows.length) {
@@ -177,7 +181,8 @@ async function sendAirdropsAdaptive(
       let recipient: PublicKey;
       try {
         recipient = new PublicKey(r.wallet);
-      } catch {
+      } catch (e) {
+        console.warn(`[AIRDROP] skip invalid pubkey: ${r.wallet}`);
         continue;
       }
 
@@ -192,38 +197,27 @@ async function sendAirdropsAdaptive(
       if (amountBase <= 0n) continue;
 
       ixs.push(
-        createAssociatedTokenAccountIdempotentInstruction(
-          devWallet.publicKey,
-          toAta,
-          recipient,
-          mintPubkey
-        ),
-        createTransferCheckedInstruction(
-          fromAta,
-          mintPubkey,
-          toAta,
-          devWallet.publicKey,
-          amountBase,
-          decimals
-        )
+        createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, recipient, mintPubkey),
+        createTransferCheckedInstruction(fromAta, mintPubkey, toAta, devWallet.publicKey, amountBase, decimals)
       );
     }
 
     try {
       const sig = await sendAirdropBatch(ixs);
       console.log(`[AIRDROP] batch (${group.length}) | https://solscan.io/tx/${sig}`);
-      await sleep(1000); // <== added throttle to avoid 429s
+      await sleep(1000); // <— added throttle to prevent 429
       idx = end;
       if (groupSize < groupSizeMax) groupSize = Math.min(groupSizeMax, groupSize + 1);
     } catch (e: any) {
       if (/too large/i.test(String(e))) {
         groupSize = Math.max(1, Math.floor(groupSize / 2));
-        console.warn(`[AIRDROP] tx too large; reducing group size to ${groupSize}…`);
+        console.warn(`[AIRDROP] tx too large; reducing group size to ${groupSize}`);
         await sleep(200);
         continue;
       }
-      if (looksRetryableMessage(String(e?.message || e))) {
-        console.warn(`[AIRDROP] retryable error; retrying batch…`);
+      const msg = String(e?.message || e);
+      if (looksRetryableMessage(msg)) {
+        console.warn(`[AIRDROP] retryable error; retrying…`);
         await sleep(800);
         continue;
       }
