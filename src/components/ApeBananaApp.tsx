@@ -831,7 +831,7 @@ export default function CandyApp() {
 
         {/* $CANDY given away */}
         <div className="p-5 rounded-2xl border border-white/10 bg-[#150b1e]">
-          <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">$CANDY given away</div>
+          <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-300/80">coming soon.</div>
           <div className="mt-1 text-2xl font-semibold">
             {totalCoinAirdropped == null ? '--' : Math.floor(totalCoinAirdropped).toLocaleString()}
           </div>
@@ -942,6 +942,7 @@ export default function CandyApp() {
     </div>
   );
 }
+
 
 
 
