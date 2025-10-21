@@ -13,11 +13,10 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
+    "plugins": [{ "name": "next" }],
+
+    /* ✅ Added for GitHub / Vercel builds */
+    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }
