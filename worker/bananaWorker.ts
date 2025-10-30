@@ -215,8 +215,8 @@ async function tokenBalance(owner: PublicKey, mintPk: PublicKey) {
     c.getParsedTokenAccountsByOwner(owner, { mint: mintPk }, "confirmed")
   );
   let total = 0;
-  for (const it of resp.value) {
-    const amt = Number(it.account.data.parsed.info.tokenAmount.uiAmount || 0);
+  for (const it of (resp as any).value) {
+    const amt = Number((it as any).account.data.parsed.info.tokenAmount.uiAmount || 0);
     total += amt;
   }
   return total;
@@ -224,7 +224,8 @@ async function tokenBalance(owner: PublicKey, mintPk: PublicKey) {
 
 async function getMintDecimals(mintPk: PublicKey): Promise<number> {
   const info = await withConnRetries((c) => c.getParsedAccountInfo(mintPk, "confirmed"));
-  const dec = info?.value?.data?.parsed?.info?.decimals;
+  const parsed: any = (info?.value as any)?.data?.parsed;
+  const dec = parsed?.info?.decimals;
   if (typeof dec !== "number") throw new Error("Unable to fetch mint decimals");
   return dec;
 }
@@ -260,7 +261,7 @@ async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippage
   const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
   const url = `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}&slippageBps=${slippageBps}&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
   return await withRetries(async () => {
-    const j = await fetchJsonWithTimeout(url, {}, 6000);
+    const j: any = await fetchJsonWithTimeout(url, {}, 6000);
     if (!j?.routePlan?.length) throw new Error("no route");
     return j;
   }, 3);
