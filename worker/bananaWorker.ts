@@ -426,27 +426,38 @@ async function safeRun(fn: () => Promise<void>, label: string, timeoutMs = 120_0
 }
 
 async function loop() {
-  const fired = new Set<string>();
-  for (;;) {
-    const { id, start, t30, t55, end } = nextTimes();
-    const now = new Date();
+  while (true) {
+    try {
+      console.log("[CYCLE] ======== NEW CYCLE ========");
 
-    if (!fired.has(id + ":claim") && now >= start) {
-      safeRun(triggerClaimAtStart, "claim", 60_000);
-      fired.add(id + ":claim");
+      // t = 0s → claim
+      console.log("[CYCLE] Claim stage");
+      await safeRun(triggerClaimAtStart, "claim", 60_000);
+
+      // wait 30s
+      console.log("[CYCLE] waiting 30s before swap...");
+      await sleep(30_000);
+
+      // t = +30s → swap
+      console.log("[CYCLE] Swap stage");
+      await safeRun(triggerSwapAt30s, "swap", 90_000);
+
+      // wait 30s
+      console.log("[CYCLE] waiting 30s before airdrop...");
+      await sleep(30_000);
+
+      // t = +60s → airdrop
+      console.log("[CYCLE] Airdrop stage");
+      await safeRun(snapshotAndDistribute, "airdrop", 180_000);
+
+      // wait 60s before restarting
+      console.log("[CYCLE] waiting 60s before next claim...");
+      await sleep(60_000);
+
+    } catch (e: any) {
+      console.error("[CYCLE] loop error:", e?.message || e);
+      await sleep(5000); // recovery wait
     }
-    if (!fired.has(id + ":swap") && now >= t30) {
-      safeRun(triggerSwapAt30s, "swap", 90_000);
-      fired.add(id + ":swap");
-    }
-    if (!fired.has(id + ":airdrop") && now >= t55) {
-      safeRun(snapshotAndDistribute, "airdrop", 180_000);
-      fired.add(id + ":airdrop");
-    }
-    if (now >= end) {
-      fired.clear(); // immediately roll into next minute
-    }
-    await sleep(250); // small tick
   }
 }
 
@@ -454,3 +465,5 @@ loop().catch(e => {
   console.error("bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
+
