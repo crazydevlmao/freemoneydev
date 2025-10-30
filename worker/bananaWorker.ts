@@ -75,34 +75,29 @@ const pow10n = (n: number) => { let r = 1n; for (let i = 0; i < n; i++) r *= 10n
 
 /* ================= Chain helpers ================= */
 async function getMintDecimals(mint: PublicKey): Promise<number> {
-  const info = await withRetries(c => c.getParsedAccountInfo(mint, "confirmed"));
+  const info = await withConnRetries(c => c.getParsedAccountInfo(mint, "confirmed"));
   if (!info?.value) throw new Error("Mint account not found");
 
-  const data: any = (info.value as any).data;
-  let parsed: any;
+  // Cast to ParsedAccountData to access .parsed safely
+  const data = (info.value.data as unknown) as { parsed?: { info?: { decimals?: number } } };
+  const decimals = data?.parsed?.info?.decimals;
 
-  // Handle both Buffer and ParsedAccountData forms safely
-  if (data && typeof data === "object" && "parsed" in data) {
-    parsed = (data as any).parsed;
-  } else if (Array.isArray(data) && data[1] === "base64") {
-    // It's a Buffer form — try to decode manually if needed
-    throw new Error("Account returned raw data, not parsed. Use getParsedAccountInfo properly.");
-  } else {
-    throw new Error("Unexpected account data structure.");
-  }
-
-  const decimals = parsed?.info?.decimals;
-  if (typeof decimals !== "number") throw new Error("Unable to read decimals from mint account");
+  if (typeof decimals !== "number") throw new Error("Unable to fetch mint decimals");
   return decimals;
 }
 
-
-async function tokenBalanceBase(owner: PublicKey, mint: PublicKey) {
-  const r = await withRetries(c => c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed"));
-  let t = 0n; for (const v of (r as any).value)
-    t += BigInt(v.account.data.parsed.info.tokenAmount.amount);
-  return t;
+async function tokenBalanceBase(owner: PublicKey, mint: PublicKey): Promise<bigint> {
+  const resp = await withConnRetries(c =>
+    c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed")
+  );
+  let total = 0n;
+  for (const it of (resp as any).value) {
+    const amtStr = (it as any).account.data.parsed.info.tokenAmount.amount as string;
+    total += BigInt(amtStr || "0");
+  }
+  return total;
 }
+
 async function getHoldersAllBase(mint: PublicKey) {
   async function scan(pid: string, filter165 = false) {
     const filters: any[] = [{ memcmp: { offset: 0, bytes: mint.toBase58() } }];
@@ -265,5 +260,6 @@ async function loop() {
 }
 
 loop().catch(e => console.error("loop crashed", e));
+
 
 
