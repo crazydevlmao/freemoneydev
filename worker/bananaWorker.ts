@@ -309,18 +309,27 @@ async function triggerClaimAtStart() {
 
 async function triggerSwap() {
   console.log("🔄 [SWAP] Initiating swap check...");
-  const walletSol = await getSolBalance(connection, devWallet.publicKey);
-  const spend = Math.max(0, Math.min(walletSol * 0.7, walletSol - 0.02));
-  if (spend <= 0.00001) return console.log(`⚪ [SWAP] Skipped — insufficient SOL (${walletSol.toFixed(4)})`);
+
+  // Use only the last claimed SOL from claim stage
+  const claimed = lastClaimState?.claimedSol ?? 0;
+  if (claimed <= 0.000001) {
+    console.log("⚪ [SWAP] Skipped — no new SOL claimed this cycle.");
+    return;
+  }
+
+  // Swap 70% of that claimed SOL
+  const spend = claimed * 0.7;
+  console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
 
   try {
     const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
     const sig = await jupSwap(connection, devWallet, q);
-    console.log(`✅ [SWAP] ${spend.toFixed(4)} SOL swapped for ${AIRDROP_MINT} | Tx: ${sig}`);
+    console.log(`✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${AIRDROP_MINT} | Tx: ${sig}`);
   } catch (e: any) {
     console.error(`❌ [SWAP] Failed: ${e?.message || e}`);
   }
 }
+
 
 async function snapshotAndDistribute() {
   console.log("🎁 [AIRDROP] Snapshotting holders...");
@@ -353,3 +362,4 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
