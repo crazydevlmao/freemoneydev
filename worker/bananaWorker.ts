@@ -537,7 +537,7 @@ async function snapshotAndDistribute() {
   if (rows.length === 0) return;
 
   // 6) Send batches
-  console.log(`[AIRDROP] starting ${rows.length} holders, distributing ${(Number(toSendBase) / pow10n(targetDec)).toFixed(2)} tokens`);
+  console.log(`[AIRDROP] starting ${rows.length} holders, distributing ${(Number(toSendBase) / 10 ** targetDec).toFixed(2)} tokens`);
   await sendAirdropsAdaptiveBase(rows, targetDec, targetMintPk);
 
   const totalSent = rows.reduce((a, r) => a + r.amountBase, 0n);
@@ -592,4 +592,5 @@ loop().catch(() => {
   console.error("bananaWorker crashed");
   process.exit(1);
 });
+
 
