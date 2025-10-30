@@ -32,8 +32,13 @@ const JUP_429_SLEEP_MS = Number(process.env.JUP_429_SLEEP_MS ?? 1000);
 const TX_RETRY_SLEEP_MS = Number(process.env.TX_RETRY_SLEEP_MS ?? 1000);
 const FINAL_SINGLE_RETRY_SLEEP_MS = Number(process.env.FINAL_SINGLE_RETRY_SLEEP_MS ?? 1000);
 
-const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPORTS ?? 10_000);
-const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 800_000);
+const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPORTS ?? 5_000);
+const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 400_000);
+
+// Airdrop throttling to avoid 429s
+const AIRDROP_BATCH_SIZE = Number(process.env.AIRDROP_BATCH_SIZE ?? 8);
+const AIRDROP_MAX_BATCH_RETRIES = Number(process.env.AIRDROP_MAX_BATCH_RETRIES ?? 3);
+const AIRDROP_MIN_TX_GAP_MS = Number(process.env.AIRDROP_MIN_TX_GAP_MS ?? 1200);
 
 if (!TRACKED_MINT || !REWARD_WALLET || !DEV_WALLET_PRIVATE_KEY)
   throw new Error("Missing TRACKED_MINT, REWARD_WALLET, or DEV_WALLET_PRIVATE_KEY");
@@ -57,7 +62,7 @@ const airdropMintPk = new PublicKey(AIRDROP_MINT);
 /* ================= Utils ================= */
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 function looksRetryable(m: string) {
-  return /429|rate.?limit|timeout|temporar|ECONN|ETIMEDOUT|blockhash|FetchError|TLS|ENOTFOUND|EAI_AGAIN/i.test(m);
+  return /429|too many requests|rate.?limit|timeout|temporar|ECONN|ETIMEDOUT|blockhash|FetchError|TLS|ENOTFOUND|EAI_AGAIN/i.test(m);
 }
 async function withRetries<T>(fn: (c: Connection) => Promise<T>, tries = 5) {
   let c = connection, last: any;
@@ -118,7 +123,7 @@ function extractSig(j: any): string | null {
   return j?.signature || j?.tx || j?.txid || j?.txId || j?.result || j?.sig || null;
 }
 
-/* ================= Chain helpers ================= */
+/* ================= Holders & balances ================= */
 async function tokenBalanceBase(owner: PublicKey, mint: PublicKey): Promise<bigint> {
   const resp = await withRetries((c: Connection) =>
     c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed")
@@ -155,7 +160,15 @@ async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: strin
 }
 
 /* ================= TX Helpers ================= */
+let LAST_TX_AT = 0;
+async function enforceTxGap() {
+  const since = Date.now() - LAST_TX_AT;
+  if (since < AIRDROP_MIN_TX_GAP_MS) {
+    await sleep(AIRDROP_MIN_TX_GAP_MS - since + Math.floor(Math.random() * 200));
+  }
+}
 async function sendAirdropBatch(ixs: any[]) {
+  await enforceTxGap();
   const tx = new Transaction();
   tx.add(
     ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
@@ -166,9 +179,72 @@ async function sendAirdropBatch(ixs: any[]) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
   tx.sign(devWallet);
-  const sig = await connection.sendRawTransaction(tx.serialize());
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
   await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+  LAST_TX_AT = Date.now();
   return sig;
+}
+
+/* ================= Jupiter (kept but not hammered) ================= */
+async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) {
+  const ac = new AbortController();
+  const id = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...opts, signal: ac.signal as any });
+    if (r.status === 429) throw new Error("HTTP_429");
+    if (!r.ok) throw new Error(String(r.status));
+    return await r.json();
+  } finally {
+    clearTimeout(id);
+  }
+}
+async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
+  const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
+  const url =
+    `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&` +
+    `outputMint=${outMint}&amount=${amountLamports}&slippageBps=${slippageBps}` +
+    `&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
+  for (let i = 0; i < JUP_MAX_TRIES; i++) {
+    try {
+      const j: any = await fetchJsonQuiet(url, {}, 6000);
+      if (!j?.routePlan?.length) throw new Error("no_route");
+      return j;
+    } catch (e: any) {
+      const m = String(e?.message || e);
+      if (m === "HTTP_429" || looksRetryable(m)) { await sleep(JUP_429_SLEEP_MS * (i + 1)); continue; }
+      if (i === JUP_MAX_TRIES - 1) throw e;
+    }
+  }
+  throw new Error("quote_failed");
+}
+async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
+  const swapReq = {
+    quoteResponse: quoteResp,
+    userPublicKey: signer.publicKey.toBase58(),
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    prioritizationFeeLamports: "auto",
+  };
+  for (let i = 0; i < JUP_MAX_TRIES; i++) {
+    try {
+      const jr: any = await fetchJsonQuiet(
+        JUP_SWAP,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(swapReq) },
+        8000
+      );
+      const txBytes = Uint8Array.from(Buffer.from(jr.swapTransaction, "base64"));
+      const tx = VersionedTransaction.deserialize(txBytes);
+      tx.sign([signer]);
+      const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+      await conn.confirmTransaction(sig, "confirmed");
+      return sig;
+    } catch (e: any) {
+      const m = String(e?.message || e);
+      if (m === "HTTP_429" || looksRetryable(m)) { await sleep(JUP_429_SLEEP_MS * (i + 1)); continue; }
+      if (i === JUP_MAX_TRIES - 1) throw e;
+    }
+  }
+  throw new Error("swap_failed");
 }
 
 /* ================= Claim / Swap ================= */
@@ -180,19 +256,31 @@ function floorCycleStart(d = new Date()) {
 }
 function nextTimes() {
   const s = floorCycleStart();
-  return { id: String(s.getTime()), start: s, t30: new Date(s.getTime() + 30_000), t55: new Date(s.getTime() + 55_000), end: new Date(s.getTime() + 60_000) };
+  return {
+    id: String(s.getTime()),
+    start: s,
+    t30: new Date(s.getTime() + 30_000),
+    t55: new Date(s.getTime() + 55_000),
+    end: new Date(s.getTime() + 60_000)
+  };
+}
+
+async function getSolBalance(conn: Connection, pubkey: PublicKey) {
+  return (await conn.getBalance(pubkey, "confirmed")) / LAMPORTS_PER_SOL;
 }
 
 async function triggerClaimAtStart() {
   const cycleId = String(floorCycleStart().getTime());
-  const preSol = await connection.getBalance(devWallet.publicKey);
-  const { res, json } = await callPumportal("/api/trade",
+  const preSol = await getSolBalance(connection, devWallet.publicKey);
+  const { res, json } = await callPumportal(
+    "/api/trade",
     { action: "collectCreatorFee", priorityFee: 0.000001, pool: "pump", mint: TRACKED_MINT },
-    `claim:${cycleId}`);
+    `claim:${cycleId}`
+  );
   if (!res.ok) throw new Error(`Claim failed ${res.status}`);
   const claimSig = extractSig(json);
-  const postSol = await connection.getBalance(devWallet.publicKey);
-  const claimedSol = (postSol - preSol) / LAMPORTS_PER_SOL;
+  const postSol = await getSolBalance(connection, devWallet.publicKey);
+  const claimedSol = Math.max(0, postSol - preSol);
   console.log(`[CLAIM] +${claimedSol} SOL | ${claimSig || "no-sig"}`);
   lastClaimState = { cycleId, preSol, claimedSol, claimSig };
   await recordOps({ lastClaim: { at: new Date().toISOString(), amountSol: claimedSol, tx: claimSig } });
@@ -200,64 +288,83 @@ async function triggerClaimAtStart() {
 
 async function triggerSwapAt30s() {
   if (!lastClaimState || lastClaimState.claimedSol <= 0) return;
-  console.log("[SWAP] starting...");
-  await sleep(2000);
-  console.log("[SWAP] done");
+  // Keep swap lightweight or comment out if you only want airdrop of existing balance.
+  try {
+    const spend = Math.max(0, Math.min(lastClaimState.claimedSol * 0.7, (await getSolBalance(connection, devWallet.publicKey)) - 0.02));
+    if (spend <= 0.00001) return;
+    const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
+    const sig = await jupSwap(connection, devWallet, q);
+    console.log(`[SWAP] ${spend} SOL -> ${AIRDROP_MINT} | ${sig}`);
+    await recordOps({ lastSwap: { at: new Date().toISOString(), spentSol: spend, tx: sig } });
+  } catch (e: any) {
+    console.warn("[SWAP] failed:", e?.message || e);
+  }
 }
 
-/* ================= Airdrop ================= */
+/* ================= Airdrop (equal split, throttled) ================= */
 async function simpleAirdropEqual(mint: PublicKey, holders: string[]) {
   if (!holders.length) return console.log("[AIRDROP] no holders");
 
-  const dec = 8;
+  const decimals = 8; // your token uses 8 decimals
   const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
   if (poolBase <= 0n) return console.log("[AIRDROP] no token balance");
 
-  const toSend = (poolBase * 90n) / 100n;
+  const toSend = (poolBase * 90n) / 100n; // send 90% of current balance
   const perHolder = toSend / BigInt(holders.length);
-  console.log(`[AIRDROP] distributing equally to ${holders.length} holders (${Number(toSend) / 10 ** dec} total)`);
+  if (perHolder <= 0n) return console.log("[AIRDROP] nothing to distribute");
+
+  console.log(`[AIRDROP] equally to ${holders.length} holders (${Number(toSend) / 10 ** decimals} total)`);
 
   const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false);
-  const batchSize = 8;
 
-  for (let i = 0; i < holders.length; i += batchSize) {
-    const group = holders.slice(i, i + batchSize);
-    const ixs: any[] = [createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint)];
+  for (let i = 0; i < holders.length; i += AIRDROP_BATCH_SIZE) {
+    const group = holders.slice(i, i + AIRDROP_BATCH_SIZE);
+
+    const ixs: any[] = [
+      createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint)
+    ];
     for (const w of group) {
       try {
         const to = new PublicKey(w);
         const toAta = getAssociatedTokenAddressSync(mint, to, true);
         ixs.push(
           createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, to, mint),
-          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, dec)
+          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, decimals)
         );
       } catch {}
     }
     if (ixs.length <= 1) continue;
-    for (let tries = 0; tries < 4; tries++) {
+
+    let ok = false;
+    for (let t = 0; t < AIRDROP_MAX_BATCH_RETRIES; t++) {
       try {
         const sig = await sendAirdropBatch(ixs);
         console.log(`[AIRDROP] batch ${group.length} | ${sig}`);
+        ok = true;
         break;
       } catch (e: any) {
         const m = String(e?.message || e);
         if (looksRetryable(m)) {
-          const wait = Math.min(8000, 1000 * 2 ** tries);
-          console.warn(`[AIRDROP] backoff ${wait}ms`);
-          await sleep(wait);
+          const wait = Math.min(8000, (t + 1) * AIRDROP_MIN_TX_GAP_MS * 2);
+          console.warn(`[AIRDROP] rate-limited, backoff ${wait}ms`);
+          await sleep(wait + Math.floor(Math.random() * 200));
           continue;
         }
-        console.warn(`[AIRDROP] failed batch: ${m}`);
+        console.warn(`[AIRDROP] non-retryable batch error: ${m}`);
         break;
       }
     }
-    await sleep(1500);
+    if (!ok) console.warn("[AIRDROP] skipped a batch after retries");
   }
+
   console.log("[AIRDROP] done");
 }
 
 async function snapshotAndDistribute() {
-  const holders = (await getHoldersAllBase(holdersMintPk)).map(h => h.wallet);
+  // minimal queries: single holders scan
+  const holders = (await getHoldersAllBase(holdersMintPk))
+    .map(h => h.wallet)
+    .filter(w => w !== devWallet.publicKey.toBase58());
   if (!holders.length) return console.log("[AIRDROP] no holders found");
   await simpleAirdropEqual(airdropMintPk, holders);
 }
@@ -274,11 +381,23 @@ async function loop() {
   for (;;) {
     const { id, start, t30, t55, end } = nextTimes();
     const now = new Date();
-    if (!fired.has(id + ":claim") && now >= start) { safeRun(triggerClaimAtStart, "claim", 60_000); fired.add(id + ":claim"); }
-    if (!fired.has(id + ":swap") && now >= t30) { safeRun(triggerSwapAt30s, "swap", 90_000); fired.add(id + ":swap"); }
-    if (!fired.has(id + ":airdrop") && now >= t55) { safeRun(snapshotAndDistribute, "airdrop", 180_000); fired.add(id + ":airdrop"); }
-    if (now >= end) fired.clear();
-    await sleep(250);
+
+    if (!fired.has(id + ":claim") && now >= start) {
+      safeRun(triggerClaimAtStart, "claim", 60_000);
+      fired.add(id + ":claim");
+    }
+    if (!fired.has(id + ":swap") && now >= t30) {
+      safeRun(triggerSwapAt30s, "swap", 90_000);
+      fired.add(id + ":swap");
+    }
+    if (!fired.has(id + ":airdrop") && now >= t55) {
+      safeRun(snapshotAndDistribute, "airdrop", 180_000);
+      fired.add(id + ":airdrop");
+    }
+    if (now >= end) {
+      fired.clear(); // immediately roll into next minute
+    }
+    await sleep(250); // small tick
   }
 }
 
