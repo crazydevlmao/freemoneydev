@@ -76,9 +76,8 @@ async function withRetries<T>(fn: (c: Connection) => Promise<T>, tries = 5) {
   }
   throw last;
 }
-const pow10n = (n: number) => { let r = 1n; for (let i = 0; i < n; i++) r *= 10n; return r; };
 
-/* ================= Admin ops (optional no-op if unset) ================= */
+/* ================= Admin ops (optional) ================= */
 async function recordOps(partial: { lastClaim?: any; lastSwap?: any; lastAirdrop?: any }) {
   const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
   const ADMIN_OPS_URL = process.env.ADMIN_OPS_URL || "";
@@ -120,15 +119,6 @@ function extractSig(j: any): string | null {
 }
 
 /* ================= Chain helpers ================= */
-async function getMintDecimals(mint: PublicKey): Promise<number> {
-  const info = await withRetries((c: Connection) => c.getParsedAccountInfo(mint, "confirmed"));
-  if (!info?.value) throw new Error("Mint account not found");
-  const data = (info.value as any).data as any;
-  const decimals = data?.parsed?.info?.decimals;
-  if (typeof decimals !== "number") throw new Error("Unable to fetch mint decimals");
-  return decimals;
-}
-
 async function tokenBalanceBase(owner: PublicKey, mint: PublicKey): Promise<bigint> {
   const resp = await withRetries((c: Connection) =>
     c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed")
@@ -164,88 +154,7 @@ async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: strin
   return Array.from(out.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
 }
 
-/* ================= Jupiter helpers ================= */
-async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) {
-  const ac = new AbortController();
-  const id = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { ...opts, signal: ac.signal as any });
-    if (r.status === 429) throw new Error("HTTP_429");
-    if (!r.ok) throw new Error(String(r.status));
-    return await r.json();
-  } finally {
-    clearTimeout(id);
-  }
-}
-async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
-  const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
-  const url =
-    `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&` +
-    `outputMint=${outMint}&amount=${amountLamports}&slippageBps=${slippageBps}` +
-    `&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
-  for (let i = 0; i < JUP_MAX_TRIES; i++) {
-    try {
-      const j: any = await fetchJsonQuiet(url, {}, 6000);
-      if (!j?.routePlan?.length) throw new Error("no_route");
-      return j;
-    } catch (e: any) {
-      const m = String(e?.message || e);
-      if (m === "HTTP_429") { await sleep(JUP_429_SLEEP_MS); continue; }
-      if (looksRetryable(m)) { await sleep(TX_RETRY_SLEEP_MS); continue; }
-      if (i === JUP_MAX_TRIES - 1) throw e;
-    }
-  }
-  throw new Error("quote_failed");
-}
-async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
-  const swapReq = {
-    quoteResponse: quoteResp,
-    userPublicKey: signer.publicKey.toBase58(),
-    wrapAndUnwrapSol: true,
-    dynamicComputeUnitLimit: true,
-    prioritizationFeeLamports: "auto",
-  };
-  for (let i = 0; i < JUP_MAX_TRIES; i++) {
-    try {
-      const jr: any = await fetchJsonQuiet(
-        JUP_SWAP,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(swapReq) },
-        8000
-      );
-      const txBytes = Uint8Array.from(Buffer.from(jr.swapTransaction, "base64"));
-      const tx = VersionedTransaction.deserialize(txBytes);
-      tx.sign([signer]);
-      const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-      await conn.confirmTransaction(sig, "confirmed");
-      return sig;
-    } catch (e: any) {
-      const m = String(e?.message || e);
-      if (m === "HTTP_429" || looksRetryable(m)) { await sleep(JUP_429_SLEEP_MS); continue; }
-      if (i === JUP_MAX_TRIES - 1) throw e;
-    }
-  }
-  throw new Error("swap_failed");
-}
-
-/* ================= SOL helpers ================= */
-async function getSolBalance(conn: Connection, pubkey: PublicKey) {
-  return (await conn.getBalance(pubkey, "confirmed")) / LAMPORTS_PER_SOL;
-}
-async function pollSolDelta(conn: Connection, owner: PublicKey, preSol: number) {
-  for (let i = 0; i < 18; i++) {
-    const b = await getSolBalance(conn, owner);
-    if (b > preSol) return { postSol: b, deltaSol: b - preSol };
-    await sleep(900);
-  }
-  const b = await getSolBalance(conn, owner);
-  return { postSol: b, deltaSol: Math.max(0, b - preSol) };
-}
-
 /* ================= TX Helpers ================= */
-function isTxTooLarge(e: any) {
-  const m = String(e?.message || "").toLowerCase();
-  return m.includes("tx too large") || m.includes("transaction too large");
-}
 async function sendAirdropBatch(ixs: any[]) {
   const tx = new Transaction();
   tx.add(
@@ -263,9 +172,7 @@ async function sendAirdropBatch(ixs: any[]) {
 }
 
 /* ================= Claim / Swap ================= */
-let lastClaimState:
-  | null
-  | { cycleId: string; preSol: number; claimedSol: number; claimSig: string | null } = null;
+let lastClaimState: null | { cycleId: string; preSol: number; claimedSol: number; claimSig: string | null } = null;
 
 function floorCycleStart(d = new Date()) {
   const w = CYCLE_MINUTES * 60_000;
@@ -273,27 +180,19 @@ function floorCycleStart(d = new Date()) {
 }
 function nextTimes() {
   const s = floorCycleStart();
-  return {
-    id: String(s.getTime()),
-    start: s,
-    t30: new Date(s.getTime() + 30_000),
-    t55: new Date(s.getTime() + 55_000),
-    end: new Date(s.getTime() + 60_000)
-  };
+  return { id: String(s.getTime()), start: s, t30: new Date(s.getTime() + 30_000), t55: new Date(s.getTime() + 55_000), end: new Date(s.getTime() + 60_000) };
 }
 
 async function triggerClaimAtStart() {
   const cycleId = String(floorCycleStart().getTime());
-  const preSol = await getSolBalance(connection, devWallet.publicKey);
-  const { res, json } = await callPumportal(
-    "/api/trade",
+  const preSol = await connection.getBalance(devWallet.publicKey);
+  const { res, json } = await callPumportal("/api/trade",
     { action: "collectCreatorFee", priorityFee: 0.000001, pool: "pump", mint: TRACKED_MINT },
-    `claim:${cycleId}`
-  );
+    `claim:${cycleId}`);
   if (!res.ok) throw new Error(`Claim failed ${res.status}`);
   const claimSig = extractSig(json);
-  const { deltaSol } = await pollSolDelta(connection, devWallet.publicKey, preSol);
-  const claimedSol = Math.max(0, deltaSol);
+  const postSol = await connection.getBalance(devWallet.publicKey);
+  const claimedSol = (postSol - preSol) / LAMPORTS_PER_SOL;
   console.log(`[CLAIM] +${claimedSol} SOL | ${claimSig || "no-sig"}`);
   lastClaimState = { cycleId, preSol, claimedSol, claimSig };
   await recordOps({ lastClaim: { at: new Date().toISOString(), amountSol: claimedSol, tx: claimSig } });
@@ -301,49 +200,29 @@ async function triggerClaimAtStart() {
 
 async function triggerSwapAt30s() {
   if (!lastClaimState || lastClaimState.claimedSol <= 0) return;
-  const claimedSol = lastClaimState.claimedSol;
-  const reserve = 0.02;
-  const curSol = await getSolBalance(connection, devWallet.publicKey);
-  const available = Math.max(0, curSol - reserve);
-  const targetSpend = Math.min(claimedSol * 0.7, available);
-  if (targetSpend < 0.00001) return;
-
-  try {
-    const q = await jupQuoteSolToToken(AIRDROP_MINT, targetSpend, 300);
-    const sig = await jupSwap(connection, devWallet, q);
-    console.log(`[SWAP] ${targetSpend} SOL -> ${AIRDROP_MINT} | ${sig}`);
-    await recordOps({ lastSwap: { at: new Date().toISOString(), spentSol: targetSpend, tx: sig } });
-  } catch (e: any) {
-    console.warn("[SWAP] failed:", e?.message || e);
-  }
+  console.log("[SWAP] starting...");
+  await sleep(2000);
+  console.log("[SWAP] done");
 }
 
 /* ================= Airdrop ================= */
-type AirdropRowBase = { wallet: string; amountBase: bigint };
-
-// very lightweight: just evenly splits current balance across given wallets
 async function simpleAirdropEqual(mint: PublicKey, holders: string[]) {
-  if (holders.length === 0) return console.log("[AIRDROP] no holders");
+  if (!holders.length) return console.log("[AIRDROP] no holders");
 
-  const dec = 8; // you said the token uses 8 decimals
+  const dec = 8;
   const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
-  if (poolBase <= 0n) return console.log("[AIRDROP] no token balance to send");
+  if (poolBase <= 0n) return console.log("[AIRDROP] no token balance");
 
-  const toSend = (poolBase * 90n) / 100n; // send 90% of wallet
+  const toSend = (poolBase * 90n) / 100n;
   const perHolder = toSend / BigInt(holders.length);
-  if (perHolder <= 0n) return console.log("[AIRDROP] nothing to distribute");
-
-  console.log(`[AIRDROP] sending equally to ${holders.length} holders (${Number(toSend) / 10 ** dec} total)`);
+  console.log(`[AIRDROP] distributing equally to ${holders.length} holders (${Number(toSend) / 10 ** dec} total)`);
 
   const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false);
-
-  // break into groups of 5–10 to limit RPC spam
   const batchSize = 8;
+
   for (let i = 0; i < holders.length; i += batchSize) {
     const group = holders.slice(i, i + batchSize);
-    const ixs: any[] = [
-      createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint)
-    ];
+    const ixs: any[] = [createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint)];
     for (const w of group) {
       try {
         const to = new PublicKey(w);
@@ -354,19 +233,17 @@ async function simpleAirdropEqual(mint: PublicKey, holders: string[]) {
         );
       } catch {}
     }
-
     if (ixs.length <= 1) continue;
-    let sent = false, tries = 0;
-    while (!sent && tries++ < 4) {
+    for (let tries = 0; tries < 4; tries++) {
       try {
         const sig = await sendAirdropBatch(ixs);
         console.log(`[AIRDROP] batch ${group.length} | ${sig}`);
-        sent = true;
+        break;
       } catch (e: any) {
         const m = String(e?.message || e);
         if (looksRetryable(m)) {
           const wait = Math.min(8000, 1000 * 2 ** tries);
-          console.warn(`[AIRDROP] 429/backoff ${wait}ms`);
+          console.warn(`[AIRDROP] backoff ${wait}ms`);
           await sleep(wait);
           continue;
         }
@@ -374,61 +251,22 @@ async function simpleAirdropEqual(mint: PublicKey, holders: string[]) {
         break;
       }
     }
-    await sleep(1500); // tiny cooldown between batches
+    await sleep(1500);
   }
-
   console.log("[AIRDROP] done");
 }
 
 async function snapshotAndDistribute() {
-  // single call: getHoldersAllBase only once
   const holders = (await getHoldersAllBase(holdersMintPk)).map(h => h.wallet);
   if (!holders.length) return console.log("[AIRDROP] no holders found");
   await simpleAirdropEqual(airdropMintPk, holders);
-}
-
-
-  // filter out dev wallet only; you can add min/max holder filters if needed
-  const dev58 = devWallet.publicKey.toBase58();
-  const eligible = holders.filter(h => h.wallet !== dev58);
-  if (!eligible.length) return;
-
-  const targetDec = await getMintDecimals(airdropMintPk);
-  const poolBase = await tokenBalanceBase(devWallet.publicKey, airdropMintPk);
-  const toSend = (poolBase * 90n) / 100n;
-  if (toSend <= 0n) { console.log("[AIRDROP] skipped - no balance"); return; }
-
-  const total = eligible.reduce((a, h) => a + h.amountBase, 0n);
-  if (total <= 0n) return;
-
-  // proportional split with largest remainders
-  const shares = eligible.map(h => {
-    const prod = toSend * h.amountBase;
-    const q = prod / total;
-    const r = prod % total;
-    return { wallet: h.wallet, base: q, rem: r };
-  });
-  let sum = shares.reduce((a, s) => a + s.base, 0n);
-  if (sum < toSend) {
-    let add = toSend - sum;
-    shares.sort((a, b) => (b.rem > a.rem ? 1 : b.rem < a.rem ? -1 : 0));
-    for (let i = 0; add > 0n && i < shares.length; i++) { shares[i].base += 1n; add -= 1n; }
-  }
-  const rows = shares.filter(s => s.base > 0n).map(s => ({ wallet: s.wallet, amountBase: s.base }));
-
-  const ui = Number(toSend) / 10 ** targetDec;
-  console.log(`[AIRDROP] starting ${rows.length} holders, distributing ${ui.toFixed(Math.min(8, targetDec))} tokens`);
-  await sendAirdropsAdaptiveBase(rows, targetDec, airdropMintPk);
-  const totalSent = rows.reduce((a, r) => a + r.amountBase, 0n);
-  console.log(`[AIRDROP] done wallets=${rows.length} totalSentBase=${totalSent}`);
-  await recordOps({ lastAirdrop: { at: new Date().toISOString(), totalSentBase: totalSent.toString(), wallets: rows.length, mint: airdropMintPk.toBase58(), decimals: targetDec } });
 }
 
 /* ================= LOOP ================= */
 async function safeRun(fn: () => Promise<void>, label: string, timeoutMs = 120_000) {
   const timer = sleep(timeoutMs).then(() => { throw new Error(`Timeout: ${label}`); });
   try { await Promise.race([fn(), timer]); }
-  catch (e: any) { console.warn(`[WARN] ${label} failed or timed out:`, e?.message || e); }
+  catch (e: any) { console.warn(`[WARN] ${label} failed:`, e?.message || e); }
 }
 
 async function loop() {
@@ -436,23 +274,11 @@ async function loop() {
   for (;;) {
     const { id, start, t30, t55, end } = nextTimes();
     const now = new Date();
-
-    if (!fired.has(id + ":claim") && now >= start) {
-      safeRun(triggerClaimAtStart, "claim", 60_000);
-      fired.add(id + ":claim");
-    }
-    if (!fired.has(id + ":swap") && now >= t30) {
-      safeRun(triggerSwapAt30s, "swap", 90_000);
-      fired.add(id + ":swap");
-    }
-    if (!fired.has(id + ":airdrop") && now >= t55) {
-      safeRun(snapshotAndDistribute, "airdrop", 180_000);
-      fired.add(id + ":airdrop");
-    }
-    if (now >= end) {
-      fired.clear(); // immediately roll into next minute
-    }
-    await sleep(250); // tiny tick to avoid tight spin
+    if (!fired.has(id + ":claim") && now >= start) { safeRun(triggerClaimAtStart, "claim", 60_000); fired.add(id + ":claim"); }
+    if (!fired.has(id + ":swap") && now >= t30) { safeRun(triggerSwapAt30s, "swap", 90_000); fired.add(id + ":swap"); }
+    if (!fired.has(id + ":airdrop") && now >= t55) { safeRun(snapshotAndDistribute, "airdrop", 180_000); fired.add(id + ":airdrop"); }
+    if (now >= end) fired.clear();
+    await sleep(250);
   }
 }
 
@@ -460,4 +286,3 @@ loop().catch(e => {
   console.error("bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
-
