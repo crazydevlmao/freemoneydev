@@ -6,6 +6,12 @@ import {
   LAMPORTS_PER_SOL, ComputeBudgetProgram
 } from "@solana/web3.js";
 import {
+  // program ids
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  // utils
+  getMint,
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountIdempotentInstruction,
   createTransferCheckedInstruction
@@ -62,7 +68,7 @@ const airdropMintPk = new PublicKey(AIRDROP_MINT);
 /* ================= Utils ================= */
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 function looksRetryable(m: string) {
-  return /429|too many requests|rate.?limit|timeout|temporar|ECONN|ETIMEDOUT|blockhash|FetchError|TLS|ENOTFOUND|EAI_AGAIN/i.test(m);
+  return /429|too many requests|rate.?limit|timeout|temporar|ECONN|ETIMEDOUT|blockhash|FetchError|TLS|ENOTFOUND|EAI_AGAIN|Connection closed/i.test(m);
 }
 async function withRetries<T>(fn: (c: Connection) => Promise<T>, tries = 5) {
   let c = connection, last: any;
@@ -154,8 +160,8 @@ async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: strin
     return map;
   }
   const out = new Map<string, bigint>();
-  try { for (const [k, v] of await scan("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", true)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
-  try { for (const [k, v] of await scan("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCx2w6G3W", false)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
+  try { for (const [k, v] of await scan(TOKEN_PROGRAM_ID.toBase58(), true)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
+  try { for (const [k, v] of await scan(TOKEN_2022_PROGRAM_ID.toBase58(), false)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
   return Array.from(out.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
 }
 
@@ -167,22 +173,46 @@ async function enforceTxGap() {
     await sleep(AIRDROP_MIN_TX_GAP_MS - since + Math.floor(Math.random() * 200));
   }
 }
+
 async function sendAirdropBatch(ixs: any[]) {
   await enforceTxGap();
-  const tx = new Transaction();
-  tx.add(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }),
-    ...ixs
-  );
-  tx.feePayer = devWallet.publicKey;
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-  tx.recentBlockhash = blockhash;
-  tx.sign(devWallet);
-  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-  await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
-  LAST_TX_AT = Date.now();
-  return sig;
+  for (let attempt = 0; attempt < AIRDROP_MAX_BATCH_RETRIES; attempt++) {
+    try {
+      const tx = new Transaction();
+      tx.add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }),
+        ...ixs
+      );
+      tx.feePayer = devWallet.publicKey;
+
+      const { blockhash, lastValidBlockHeight } = await withRetries(c => c.getLatestBlockhash("confirmed"), 4);
+      tx.recentBlockhash = blockhash;
+      tx.sign(devWallet);
+
+      const sig = await withRetries(async c => {
+        const raw = tx.serialize();
+        const s = await c.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
+        await c.confirmTransaction({ signature: s, blockhash, lastValidBlockHeight }, "confirmed");
+        return s;
+      }, 4);
+
+      LAST_TX_AT = Date.now();
+      return sig;
+    } catch (e: any) {
+      const m = String(e?.message || e);
+      if (looksRetryable(m)) {
+        const wait = Math.min(10_000, (attempt + 1) * AIRDROP_MIN_TX_GAP_MS * 2);
+        console.warn(`[AIRDROP] transient "${m.slice(0, 140)}" backoff ${wait}ms`);
+        if (RPCS.length > 1) connection = rotateConn();
+        await sleep(wait + Math.floor(Math.random() * 200));
+        continue;
+      }
+      console.warn(`[AIRDROP] non-retryable: ${m}`);
+      throw e;
+    }
+  }
+  throw new Error("airdrop_batch_failed_after_retries");
 }
 
 /* ================= Jupiter (kept but not hammered) ================= */
@@ -288,7 +318,6 @@ async function triggerClaimAtStart() {
 
 async function triggerSwapAt30s() {
   if (!lastClaimState || lastClaimState.claimedSol <= 0) return;
-  // Keep swap lightweight or comment out if you only want airdrop of existing balance.
   try {
     const spend = Math.max(0, Math.min(lastClaimState.claimedSol * 0.7, (await getSolBalance(connection, devWallet.publicKey)) - 0.02));
     if (spend <= 0.00001) return;
@@ -301,11 +330,32 @@ async function triggerSwapAt30s() {
   }
 }
 
-/* ================= Airdrop (equal split, throttled) ================= */
-async function simpleAirdropEqual(mint: PublicKey, holders: string[]) {
+/* ================= Mint meta ================= */
+async function resolveMintMeta(mintPk: PublicKey) {
+  const info = await withRetries(c => c.getAccountInfo(mintPk, "confirmed"), 5);
+  if (!info) throw new Error("Mint account not found");
+  const is22 = info.owner.equals(TOKEN_2022_PROGRAM_ID);
+  const tokenProgram = is22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const mintInfo = await withRetries(c => getMint(c, mintPk, "confirmed", tokenProgram), 5);
+  const decimals = mintInfo.decimals;
+  return { tokenProgram, decimals };
+}
+
+/* ================= Airdrop (equal split, throttled, program-aware) ================= */
+async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
+  // dedupe and filter the set first
+  const seen = new Set<string>();
+  const holders = holdersIn.filter(w => {
+    if (!w) return false;
+    if (w === devWallet.publicKey.toBase58()) return false;
+    if (seen.has(w)) return false;
+    seen.add(w);
+    return true;
+  });
   if (!holders.length) return console.log("[AIRDROP] no holders");
 
-  const decimals = 8; // your token uses 8 decimals
+  const { tokenProgram, decimals } = await resolveMintMeta(mint);
+
   const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
   if (poolBase <= 0n) return console.log("[AIRDROP] no token balance");
 
@@ -315,56 +365,55 @@ async function simpleAirdropEqual(mint: PublicKey, holders: string[]) {
 
   console.log(`[AIRDROP] equally to ${holders.length} holders (${Number(toSend) / 10 ** decimals} total)`);
 
-  const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false);
+  // derive sender ATA once per batch; it is cheap to include create-ATA idempotent
+  const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
 
-  for (let i = 0; i < holders.length; i += AIRDROP_BATCH_SIZE) {
-    const group = holders.slice(i, i + AIRDROP_BATCH_SIZE);
+  // keep txs small for reliability
+  const BATCH = Math.max(3, Math.min(AIRDROP_BATCH_SIZE, 6));
+
+  for (let i = 0; i < holders.length; i += BATCH) {
+    const group = holders.slice(i, i + BATCH);
 
     const ixs: any[] = [
-      createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint)
+      createAssociatedTokenAccountIdempotentInstruction(
+        devWallet.publicKey, fromAta, devWallet.publicKey, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID
+      )
     ];
+
     for (const w of group) {
       try {
         const to = new PublicKey(w);
-        const toAta = getAssociatedTokenAddressSync(mint, to, true);
+        const toAta = getAssociatedTokenAddressSync(mint, to, true, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
         ixs.push(
-          createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, to, mint),
-          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, decimals)
+          createAssociatedTokenAccountIdempotentInstruction(
+            devWallet.publicKey, toAta, to, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID
+          ),
+          createTransferCheckedInstruction(
+            fromAta, mint, toAta, devWallet.publicKey, perHolder, decimals, [], tokenProgram
+          )
         );
-      } catch {}
-    }
-    if (ixs.length <= 1) continue;
-
-    let ok = false;
-    for (let t = 0; t < AIRDROP_MAX_BATCH_RETRIES; t++) {
-      try {
-        const sig = await sendAirdropBatch(ixs);
-        console.log(`[AIRDROP] batch ${group.length} | ${sig}`);
-        ok = true;
-        break;
-      } catch (e: any) {
-        const m = String(e?.message || e);
-        if (looksRetryable(m)) {
-          const wait = Math.min(8000, (t + 1) * AIRDROP_MIN_TX_GAP_MS * 2);
-          console.warn(`[AIRDROP] rate-limited, backoff ${wait}ms`);
-          await sleep(wait + Math.floor(Math.random() * 200));
-          continue;
-        }
-        console.warn(`[AIRDROP] non-retryable batch error: ${m}`);
-        break;
+      } catch (e) {
+        console.warn(`[AIRDROP] skip invalid wallet ${w}: ${String((e as any)?.message || e)}`);
       }
     }
-    if (!ok) console.warn("[AIRDROP] skipped a batch after retries");
+
+    if (ixs.length <= 1) continue;
+
+    try {
+      const sig = await sendAirdropBatch(ixs);
+      console.log(`[AIRDROP] batch ${group.length} | ${sig}`);
+    } catch (e: any) {
+      console.warn(`[AIRDROP] skipped a batch after retries: ${String(e?.message || e)}`);
+    }
   }
 
   console.log("[AIRDROP] done");
 }
 
 async function snapshotAndDistribute() {
-  // minimal queries: single holders scan
   const holders = (await getHoldersAllBase(holdersMintPk))
     .map(h => h.wallet)
-    .filter(w => w !== devWallet.publicKey.toBase58());
+    .filter(Boolean);
   if (!holders.length) return console.log("[AIRDROP] no holders found");
   await simpleAirdropEqual(airdropMintPk, holders);
 }
