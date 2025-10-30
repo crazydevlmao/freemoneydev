@@ -23,12 +23,12 @@ const CYCLE_MINUTES = 1; // every 1 min
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
 const AIRDROP_MINT =
   process.env.AIRDROP_MINT ||
-  "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh"; // target coin for swap + airdrop
+  "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
 
 const REWARD_WALLET = process.env.REWARD_WALLET || "";
 const DEV_WALLET_PRIVATE_KEY = process.env.DEV_WALLET_PRIVATE_KEY || "";
 
-// Airdrop holder filters
+// Airdrop holder filters in UI units
 const MIN_HOLDER_BALANCE = Number(process.env.MIN_HOLDER_BALANCE ?? 100_000);
 const MAX_HOLDER_BALANCE = Number(process.env.MAX_HOLDER_BALANCE ?? 50_000_000);
 
@@ -79,13 +79,11 @@ if (REWARD_WALLET !== devWallet.publicKey.toBase58()) {
 }
 
 /* ================= Utils ================= */
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-function floorCycleStart(d = new Date()) {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const floorCycleStart = (d = new Date()) => {
   const w = CYCLE_MINUTES * 60_000;
   return new Date(Math.floor(d.getTime() / w) * w);
-}
+};
 function nextTimes() {
   const start = floorCycleStart();
   const tPlus30 = new Date(start.getTime() + 30_000);
@@ -131,6 +129,7 @@ async function withConnRetries<T>(fn: (c: Connection) => Promise<T>, attempts = 
 }
 
 /* ================= Admin ops ================= */
+// Quietly no-op if service is suspended or non-OK
 async function recordOps(partial: { lastClaim?: any; lastSwap?: any; lastAirdrop?: any }) {
   if (!ADMIN_SECRET || !ADMIN_OPS_URL) return;
   try {
@@ -139,9 +138,13 @@ async function recordOps(partial: { lastClaim?: any; lastSwap?: any; lastAirdrop
       headers: { "content-type": "application/json", "x-admin-secret": ADMIN_SECRET },
       body: JSON.stringify(partial),
     });
-    if (!res.ok) console.error(`[OPS] ${res.status}: ${await res.text()}`);
-  } catch (e: any) {
-    console.error("[OPS] Network error:", e?.message || e);
+    if (!res.ok) {
+      // Swallow noisy HTML bodies like "Service Suspended"
+      if (res.status === 503) return;
+      return;
+    }
+  } catch {
+    // fully suppress network logs for ops
   }
 }
 
@@ -175,52 +178,11 @@ function extractSig(j: any): string | null {
 }
 
 /* ================= Chain helpers ================= */
-async function getHoldersAll(mint: string) {
-  const mintPk = new PublicKey(mint);
-  async function scan(programId: string, addFilter165 = false) {
-    const filters: any[] = [{ memcmp: { offset: 0, bytes: mintPk.toBase58() } }];
-    if (addFilter165) filters.unshift({ dataSize: 165 });
-    const accs = (await withConnRetries((c) =>
-      c.getParsedProgramAccounts(new PublicKey(programId), { filters })
-    )) as any[];
-    const out: Record<string, number> = {};
-    for (const it of accs) {
-      const info: any = it?.account?.data?.parsed?.info;
-      const owner = info?.owner;
-      const ta = info?.tokenAmount;
-      const amt = Number(ta?.uiAmount ?? ta?.uiAmountString ?? 0);
-      if (!owner || !(amt > 0)) continue;
-      out[owner] = (out[owner] ?? 0) + amt;
-    }
-    return out;
-  }
-  const merged: Record<string, number> = {};
-  try {
-    Object.entries(await scan("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", true)).forEach(
-      ([k, v]) => (merged[k] = (merged[k] ?? 0) + v)
-    );
-  } catch {}
-  try {
-    Object.entries(await scan("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCx2w6G3W", false)).forEach(
-      ([k, v]) => (merged[k] = (merged[k] ?? 0) + v)
-    );
-  } catch {}
-  return Object.entries(merged)
-    .map(([wallet, balance]) => ({ wallet, balance }))
-    .filter((r) => r.balance > 0);
-}
-
-async function tokenBalance(owner: PublicKey, mintPk: PublicKey) {
-  const resp = await withConnRetries((c) =>
-    c.getParsedTokenAccountsByOwner(owner, { mint: mintPk }, "confirmed")
-  );
-  let total = 0;
-  for (const it of (resp as any).value) {
-    const amt = Number((it as any).account.data.parsed.info.tokenAmount.uiAmount || 0);
-    total += amt;
-  }
-  return total;
-}
+const pow10n = (n: number) => {
+  let r = 1n;
+  for (let i = 0; i < n; i++) r *= 10n;
+  return r;
+};
 
 async function getMintDecimals(mintPk: PublicKey): Promise<number> {
   const info = await withConnRetries((c) => c.getParsedAccountInfo(mintPk, "confirmed"));
@@ -228,6 +190,52 @@ async function getMintDecimals(mintPk: PublicKey): Promise<number> {
   const dec = parsed?.info?.decimals;
   if (typeof dec !== "number") throw new Error("Unable to fetch mint decimals");
   return dec;
+}
+
+// Return [{wallet, amountBase: bigint}] using only on-chain program scans
+async function getHoldersAllBase(mint: PublicKey) {
+  async function scan(programId: string, addFilter165 = false) {
+    const filters: any[] = [{ memcmp: { offset: 0, bytes: mint.toBase58() } }];
+    if (addFilter165) filters.unshift({ dataSize: 165 });
+    const accs = (await withConnRetries((c) =>
+      c.getParsedProgramAccounts(new PublicKey(programId), { filters })
+    )) as any[];
+    const out = new Map<string, bigint>();
+    for (const it of accs) {
+      const info: any = it?.account?.data?.parsed?.info;
+      const owner = info?.owner;
+      const ta = info?.tokenAmount;
+      const amtBaseStr = ta?.amount; // string raw base units
+      if (!owner || !amtBaseStr) continue;
+      const amt = BigInt(amtBaseStr);
+      if (amt <= 0n) continue;
+      out.set(owner, (out.get(owner) ?? 0n) + amt);
+    }
+    return out;
+  }
+  const merged = new Map<string, bigint>();
+  try {
+    const m1 = await scan("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", true);
+    for (const [k, v] of m1) merged.set(k, (merged.get(k) ?? 0n) + v);
+  } catch {}
+  try {
+    const m2 = await scan("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCx2w6G3W", false);
+    for (const [k, v] of m2) merged.set(k, (merged.get(k) ?? 0n) + v);
+  } catch {}
+  return Array.from(merged.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
+}
+
+// Sum wallet balance for a mint in base units
+async function tokenBalanceBase(owner: PublicKey, mintPk: PublicKey): Promise<bigint> {
+  const resp = await withConnRetries((c) =>
+    c.getParsedTokenAccountsByOwner(owner, { mint: mintPk }, "confirmed")
+  );
+  let total = 0n;
+  for (const it of (resp as any).value) {
+    const amtStr = (it as any).account.data.parsed.info.tokenAmount.amount as string;
+    total += BigInt(amtStr || "0");
+  }
+  return total;
 }
 
 /* ================= Jupiter ================= */
@@ -301,8 +309,9 @@ async function pollSolDelta(conn: Connection, owner: PublicKey, preSol: number) 
 }
 
 /* ================= Claim / Swap / Airdrop ================= */
-let lastClaimState: null | { cycleId: string; preSol: number; claimedSol: number; claimSig: string | null } =
-  null;
+let lastClaimState:
+  | null
+  | { cycleId: string; preSol: number; claimedSol: number; claimSig: string | null } = null;
 
 async function triggerClaimAtStart() {
   const cycleId = String(floorCycleStart().getTime());
@@ -314,11 +323,11 @@ async function triggerClaimAtStart() {
       `claim:${cycleId}`
     )
   );
-  if (!res.ok) throw new Error(`Claim failed: ${JSON.stringify(json)}`);
+  if (!res.ok) throw new Error(`Claim failed ${res.status}`);
   const claimSig = extractSig(json);
-  const { postSol, deltaSol } = await pollSolDelta(connection, devWallet.publicKey, preSol);
+  const { deltaSol } = await pollSolDelta(connection, devWallet.publicKey, preSol);
   const claimedSol = Math.max(0, deltaSol);
-  console.log(`[CLAIM] delta=${claimedSol} SOL | ${claimSig}`);
+  console.log(`[CLAIM] +${claimedSol} SOL | ${claimSig || "no-sig"}`);
   lastClaimState = { cycleId, preSol, claimedSol, claimSig };
   await recordOps({
     lastClaim: { at: new Date().toISOString(), amountSol: claimedSol, tx: claimSig },
@@ -373,32 +382,35 @@ async function sendAirdropBatch(ixs: any[]) {
   });
 }
 
-/* bulletproof adaptive sender */
-async function sendAirdropsAdaptive(rows: any[], decimals: number) {
-  const factor = 10 ** decimals;
-  const uiToBase = (x: number) => BigInt(Math.floor(x * factor));
+/* adaptive sender over base units */
+type AirdropRowBase = { wallet: string; amountBase: bigint };
+async function sendAirdropsAdaptiveBase(rows: AirdropRowBase[], decimals: number) {
   const fromAta = getAssociatedTokenAddressSync(airdropMintPk, devWallet.publicKey, false);
   let queue = rows.slice();
-  const failed: any[] = [];
+  const failed: AirdropRowBase[] = [];
   let groupSize = 10;
+
+  const mkIx = (r: AirdropRowBase) => {
+    const recipient = new PublicKey(r.wallet);
+    const toAta = getAssociatedTokenAddressSync(airdropMintPk, recipient, true);
+    return [
+      createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, recipient, airdropMintPk),
+      createTransferCheckedInstruction(fromAta, airdropMintPk, toAta, devWallet.publicKey, r.amountBase, decimals),
+    ];
+  };
 
   while (queue.length > 0) {
     const group = queue.splice(0, Math.min(groupSize, queue.length));
     const ixs: any[] = [];
     for (const r of group) {
       try {
-        const recipient = new PublicKey(r.wallet);
-        const toAta = getAssociatedTokenAddressSync(airdropMintPk, recipient, true);
-        const amountBase = uiToBase(r.amountUi);
-        if (amountBase <= 0n) continue;
-        ixs.push(
-          createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, recipient, airdropMintPk),
-          createTransferCheckedInstruction(fromAta, airdropMintPk, toAta, devWallet.publicKey, amountBase, decimals)
-        );
-      } catch (e) {
-        console.warn(`[AIRDROP] skip bad wallet ${r.wallet}`);
+        if (r.amountBase <= 0n) continue;
+        ixs.push(...mkIx(r));
+      } catch {
+        // skip bad wallet formats silently
       }
     }
+    if (ixs.length === 0) continue;
     try {
       const sig = await sendAirdropBatch(ixs);
       console.log(`[AIRDROP] batch (${ixs.length / 2}) | ${sig}`);
@@ -418,18 +430,12 @@ async function sendAirdropsAdaptive(rows: any[], decimals: number) {
 
   // retry singles
   for (let round = 0; round < 5 && failed.length > 0; round++) {
-    const still: any[] = [];
+    const still: AirdropRowBase[] = [];
     for (const r of failed.splice(0)) {
       try {
-        const recipient = new PublicKey(r.wallet);
-        const toAta = getAssociatedTokenAddressSync(airdropMintPk, recipient, true);
-        const amountBase = uiToBase(r.amountUi);
-        const sig = await sendAirdropBatch([
-          createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, recipient, airdropMintPk),
-          createTransferCheckedInstruction(fromAta, airdropMintPk, toAta, devWallet.publicKey, amountBase, decimals),
-        ]);
-        console.log(`[AIRDROP] single ${recipient.toBase58()} | ${sig}`);
-      } catch (e: any) {
+        const sig = await sendAirdropBatch(mkIx(r));
+        console.log(`[AIRDROP] single ${r.wallet} | ${sig}`);
+      } catch {
         still.push(r);
       }
     }
@@ -442,37 +448,56 @@ async function sendAirdropsAdaptive(rows: any[], decimals: number) {
 }
 
 async function snapshotAndDistribute() {
-  const holdersRaw = await getHoldersAll(TRACKED_MINT);
-  const holders = holdersRaw.filter(
-    (h) => h.balance >= MIN_HOLDER_BALANCE && h.balance <= MAX_HOLDER_BALANCE
+  // 1) Fetch holders on-chain in base units
+  const holdersBase = await getHoldersAllBase(holdersMintPk);
+  if (holdersBase.length === 0) return;
+
+  // 2) Convert filters to base units using tracked mint decimals
+  const trackedDec = await getMintDecimals(holdersMintPk);
+  const trackedPow = pow10n(trackedDec);
+  const minBase = BigInt(Math.floor(MIN_HOLDER_BALANCE)) * trackedPow;
+  const maxBase = BigInt(Math.floor(MAX_HOLDER_BALANCE)) * trackedPow;
+
+  // 3) Apply filters and exclude sender wallet just in case
+  const dev58 = devWallet.publicKey.toBase58();
+  const eligible = holdersBase.filter(
+    (h) => h.wallet !== dev58 && h.amountBase >= minBase && h.amountBase <= maxBase
   );
-  if (holders.length === 0) return;
+  if (eligible.length === 0) return;
 
-  const poolUi = await tokenBalance(devWallet.publicKey, airdropMintPk);
-  const toSendUi = Math.floor(poolUi * 0.9);
-  if (toSendUi <= 0) return;
+  // 4) Get airdrop pool balance in base units and compute 90%
+  const airdropDec = await getMintDecimals(airdropMintPk);
+  const poolBase = await tokenBalanceBase(devWallet.publicKey, airdropMintPk);
+  const toSendBase = (poolBase * 90n) / 100n; // 90%
+  if (toSendBase <= 0n) return;
 
-  const totalEligible = holders.reduce((a, h) => a + h.balance, 0);
-  const rows = holders
+  // 5) Proportional split in base units (no floating)
+  const totalEligibleBase = eligible.reduce((a, h) => a + h.amountBase, 0n);
+  if (totalEligibleBase <= 0n) return;
+
+  const rows: AirdropRowBase[] = eligible
     .map((h) => ({
       wallet: h.wallet,
-      amountUi: Math.floor((toSendUi * h.balance) / totalEligible),
+      amountBase: (toSendBase * h.amountBase) / totalEligibleBase,
     }))
-    .filter((r) => r.amountUi > 0);
+    .filter((r) => r.amountBase > 0n);
 
-  const decimals = await getMintDecimals(airdropMintPk);
-  await sendAirdropsAdaptive(rows, decimals);
+  if (rows.length === 0) return;
 
-  const totalSent = rows.reduce((a, r) => a + r.amountUi, 0);
+  // 6) Send
+  await sendAirdropsAdaptiveBase(rows, airdropDec);
+
+  const totalSent = rows.reduce((a, r) => a + r.amountBase, 0n);
   await recordOps({
     lastAirdrop: {
       at: new Date().toISOString(),
-      totalSentUi: totalSent,
+      totalSentBase: totalSent.toString(),
       wallets: rows.length,
       mint: AIRDROP_MINT,
+      decimals: airdropDec,
     },
   });
-  console.log(`[AIRDROP] done ${rows.length} wallets totalSent=${totalSent}`);
+  console.log(`[AIRDROP] done wallets=${rows.length} totalSentBase=${totalSent.toString()}`);
 }
 
 /* ================= Loop ================= */
@@ -481,11 +506,12 @@ async function loop() {
   for (;;) {
     const { id, start, tPlus30, tPlus60Minus5, end } = nextTimes();
     const now = new Date();
+
     if (!fired.has(id + ":claim") && now >= start) {
       try {
         await triggerClaimAtStart();
       } catch (e) {
-        console.error("Claim error:", e);
+        console.error("Claim error");
       }
       fired.add(id + ":claim");
     }
@@ -493,7 +519,7 @@ async function loop() {
       try {
         await triggerSwapAt30s();
       } catch (e) {
-        console.error("Swap error:", e);
+        console.error("Swap error");
       }
       fired.add(id + ":swap");
     }
@@ -501,7 +527,7 @@ async function loop() {
       try {
         await snapshotAndDistribute();
       } catch (e) {
-        console.error("Airdrop error:", e);
+        console.error("Airdrop error");
       }
       fired.add(id + ":dist");
     }
@@ -515,6 +541,6 @@ async function loop() {
 }
 
 loop().catch((err) => {
-  console.error("bananaWorker crashed:", err);
+  console.error("bananaWorker crashed");
   process.exit(1);
 });
