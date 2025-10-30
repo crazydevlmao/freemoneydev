@@ -321,54 +321,72 @@ async function triggerSwapAt30s() {
 /* ================= Airdrop ================= */
 type AirdropRowBase = { wallet: string; amountBase: bigint };
 
-async function sendAirdropsAdaptiveBase(rows: AirdropRowBase[], decimals: number, mint: PublicKey) {
-  const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false);
-  let queue = rows.slice();
-  let groupSize = Number(process.env.AIRDROP_GROUP_SIZE ?? 10);
+// very lightweight: just evenly splits current balance across given wallets
+async function simpleAirdropEqual(mint: PublicKey, holders: string[]) {
+  if (holders.length === 0) return console.log("[AIRDROP] no holders");
 
-  while (queue.length > 0) {
-    const group = queue.splice(0, Math.min(groupSize, queue.length));
+  const dec = 8; // you said the token uses 8 decimals
+  const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
+  if (poolBase <= 0n) return console.log("[AIRDROP] no token balance to send");
+
+  const toSend = (poolBase * 90n) / 100n; // send 90% of wallet
+  const perHolder = toSend / BigInt(holders.length);
+  if (perHolder <= 0n) return console.log("[AIRDROP] nothing to distribute");
+
+  console.log(`[AIRDROP] sending equally to ${holders.length} holders (${Number(toSend) / 10 ** dec} total)`);
+
+  const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false);
+
+  // break into groups of 5–10 to limit RPC spam
+  const batchSize = 8;
+  for (let i = 0; i < holders.length; i += batchSize) {
+    const group = holders.slice(i, i + batchSize);
     const ixs: any[] = [
       createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint)
     ];
-    for (const r of group) {
+    for (const w of group) {
       try {
-        if (r.amountBase <= 0n) continue;
-        const recipient = new PublicKey(r.wallet);
-        const toAta = getAssociatedTokenAddressSync(mint, recipient, true);
+        const to = new PublicKey(w);
+        const toAta = getAssociatedTokenAddressSync(mint, to, true);
         ixs.push(
-          createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, recipient, mint),
-          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, r.amountBase, decimals)
+          createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, to, mint),
+          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, dec)
         );
       } catch {}
     }
-    if (ixs.length <= 1) continue;
 
-    let tries = 0;
-    while (tries++ < 5) {
+    if (ixs.length <= 1) continue;
+    let sent = false, tries = 0;
+    while (!sent && tries++ < 4) {
       try {
         const sig = await sendAirdropBatch(ixs);
         console.log(`[AIRDROP] batch ${group.length} | ${sig}`);
-        groupSize = Math.min(groupSize + 1, Number(process.env.AIRDROP_GROUP_MAX ?? 12));
-        break;
+        sent = true;
       } catch (e: any) {
-        const msg = String(e?.message || e);
-        if (isTxTooLarge(e) && groupSize > 1) {
-          groupSize = Math.max(1, Math.floor(groupSize / 2));
-          queue = group.concat(queue);
-          break;
+        const m = String(e?.message || e);
+        if (looksRetryable(m)) {
+          const wait = Math.min(8000, 1000 * 2 ** tries);
+          console.warn(`[AIRDROP] 429/backoff ${wait}ms`);
+          await sleep(wait);
+          continue;
         }
-        if (looksRetryable(msg)) { await sleep(TX_RETRY_SLEEP_MS); continue; }
-        console.warn("[AIRDROP] batch failed permanently:", e?.message || e);
+        console.warn(`[AIRDROP] failed batch: ${m}`);
         break;
       }
     }
+    await sleep(1500); // tiny cooldown between batches
   }
+
+  console.log("[AIRDROP] done");
 }
 
 async function snapshotAndDistribute() {
-  const holders = await getHoldersAllBase(holdersMintPk);
-  if (!holders.length) return;
+  // single call: getHoldersAllBase only once
+  const holders = (await getHoldersAllBase(holdersMintPk)).map(h => h.wallet);
+  if (!holders.length) return console.log("[AIRDROP] no holders found");
+  await simpleAirdropEqual(airdropMintPk, holders);
+}
+
 
   // filter out dev wallet only; you can add min/max holder filters if needed
   const dev58 = devWallet.publicKey.toBase58();
@@ -442,3 +460,4 @@ loop().catch(e => {
   console.error("bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
