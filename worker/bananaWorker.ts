@@ -74,10 +74,16 @@ async function withRetries<T>(fn: (c: Connection) => Promise<T>, tries = 4) {
 const pow10n = (n: number) => { let r = 1n; for (let i = 0; i < n; i++) r *= 10n; return r; };
 
 /* ================= Chain helpers ================= */
-async function getMintDecimals(mint: PublicKey) {
+async function getMintDecimals(mint: PublicKey): Promise<number> {
   const info = await withRetries(c => c.getParsedAccountInfo(mint, "confirmed"));
-  return (info?.value as any)?.data?.parsed?.info?.decimals ?? 0;
+  const accValue: any = info?.value;
+  if (!accValue?.data) throw new Error("Mint account not found");
+  const parsed = (accValue.data as any)?.parsed;
+  const decimals = parsed?.info?.decimals;
+  if (typeof decimals !== "number") throw new Error("Unable to parse mint decimals");
+  return decimals;
 }
+
 async function tokenBalanceBase(owner: PublicKey, mint: PublicKey) {
   const r = await withRetries(c => c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed"));
   let t = 0n; for (const v of (r as any).value)
@@ -246,3 +252,4 @@ async function loop() {
 }
 
 loop().catch(e => console.error("loop crashed", e));
+
