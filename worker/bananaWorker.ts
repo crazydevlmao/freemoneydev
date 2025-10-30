@@ -528,11 +528,13 @@ async function snapshotAndDistribute() {
   if (totalEligibleBase <= 0n) return;
 
   const rows = eligible
-    .map((h) => ({
-      wallet: h.wallet,
-      amountBase: (toSendBase * h.amountBase) / totalEligibleBase,
-    }))
-    .filter((r) => r.amountBase > 0n);
+  .map((h) => {
+    // multiply by 1000 then divide, for fractional rounding
+    let raw = (toSendBase * h.amountBase * 1000n) / totalEligibleBase;
+    if (raw === 0n) raw = 1n; // guarantee min 1 base unit
+    return { wallet: h.wallet, amountBase: raw / 1000n };
+  });
+
 
   if (rows.length === 0) return;
 
@@ -592,5 +594,6 @@ loop().catch(() => {
   console.error("bananaWorker crashed");
   process.exit(1);
 });
+
 
 
