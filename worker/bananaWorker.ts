@@ -113,6 +113,18 @@ async function getSolBalance(conn: Connection, pubkey: PublicKey) {
   return (await conn.getBalance(pubkey, "confirmed")) / LAMPORTS_PER_SOL;
 }
 
+async function tokenBalanceBase(owner: PublicKey, mint: PublicKey): Promise<bigint> {
+  const resp = await withRetries((c: Connection) =>
+    c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed")
+  );
+  let total = 0n;
+  for (const it of (resp as any).value) {
+    const amtStr = (it as any).account.data.parsed.info.tokenAmount.amount as string;
+    total += BigInt(amtStr || "0");
+  }
+  return total;
+}
+
 /* ================= JUPITER ================= */
 async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) {
   const ac = new AbortController();
@@ -339,5 +351,4 @@ async function loop() {
 
 loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
-  process.exit(1);
-});
+  process.exit(
