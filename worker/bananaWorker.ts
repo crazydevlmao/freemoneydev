@@ -76,13 +76,26 @@ const pow10n = (n: number) => { let r = 1n; for (let i = 0; i < n; i++) r *= 10n
 /* ================= Chain helpers ================= */
 async function getMintDecimals(mint: PublicKey): Promise<number> {
   const info = await withRetries(c => c.getParsedAccountInfo(mint, "confirmed"));
-  const accValue: any = info?.value;
-  if (!accValue?.data) throw new Error("Mint account not found");
-  const parsed = (accValue.data as any)?.parsed;
+  if (!info?.value) throw new Error("Mint account not found");
+
+  const data: any = (info.value as any).data;
+  let parsed: any;
+
+  // Handle both Buffer and ParsedAccountData forms safely
+  if (data && typeof data === "object" && "parsed" in data) {
+    parsed = (data as any).parsed;
+  } else if (Array.isArray(data) && data[1] === "base64") {
+    // It's a Buffer form — try to decode manually if needed
+    throw new Error("Account returned raw data, not parsed. Use getParsedAccountInfo properly.");
+  } else {
+    throw new Error("Unexpected account data structure.");
+  }
+
   const decimals = parsed?.info?.decimals;
-  if (typeof decimals !== "number") throw new Error("Unable to parse mint decimals");
+  if (typeof decimals !== "number") throw new Error("Unable to read decimals from mint account");
   return decimals;
 }
+
 
 async function tokenBalanceBase(owner: PublicKey, mint: PublicKey) {
   const r = await withRetries(c => c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed"));
@@ -252,4 +265,5 @@ async function loop() {
 }
 
 loop().catch(e => console.error("loop crashed", e));
+
 
