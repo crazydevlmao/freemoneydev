@@ -351,4 +351,5 @@ async function loop() {
 
 loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
-  process.exit(
+  process.exit(1);
+});
