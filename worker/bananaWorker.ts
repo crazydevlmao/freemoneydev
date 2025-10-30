@@ -384,7 +384,7 @@ async function sendAirdropBatch(ixs: any[]) {
 /* Robust batched sender over base units, with ATA creation and quiet retries */
 type AirdropRowBase = { wallet: string; amountBase: bigint };
 
-async function sendAirdropsAdaptiveBase(rows: AirdropRowBase[], decimals: number) {
+async function sendAirdropsAdaptiveBase(rows: AirdropRowBase[], decimals: number, mintPk: PublicKey) {
   const fromAta = getAssociatedTokenAddressSync(airdropMintPk, devWallet.publicKey, false);
 
   let queue = rows.slice();
@@ -495,34 +495,39 @@ async function sendAirdropsAdaptiveBase(rows: AirdropRowBase[], decimals: number
 }
 
 async function snapshotAndDistribute() {
-  // 1) Holders on chain
+  // 1) Fixed target: Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh
+  const targetMintPk = new PublicKey("Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh");
+
+  // 2) Fetch holders of the tracked mint
   const holdersBase = await getHoldersAllBase(holdersMintPk);
   if (holdersBase.length === 0) return;
 
-  // 2) Filters in base units
+  // 3) Apply filters (in base units)
   const trackedDec = await getMintDecimals(holdersMintPk);
   const trackedPow = pow10n(trackedDec);
   const minBase = BigInt(Math.floor(MIN_HOLDER_BALANCE)) * trackedPow;
   const maxBase = BigInt(Math.floor(MAX_HOLDER_BALANCE)) * trackedPow;
-
-  // 3) Eligible set
   const dev58 = devWallet.publicKey.toBase58();
+
   const eligible = holdersBase.filter(
     (h) => h.wallet !== dev58 && h.amountBase >= minBase && h.amountBase <= maxBase
   );
   if (eligible.length === 0) return;
 
-  // 4) Pool balance to distribute
-  const airdropDec = await getMintDecimals(airdropMintPk);
-  const poolBase = await tokenBalanceBase(devWallet.publicKey, airdropMintPk);
-  const toSendBase = (poolBase * 90n) / 100n; // 90%
-  if (toSendBase <= 0n) return;
+  // 4) Check available tokens in dev wallet (Xsc9... mint)
+  const targetDec = await getMintDecimals(targetMintPk);
+  const poolBase = await tokenBalanceBase(devWallet.publicKey, targetMintPk);
+  const toSendBase = (poolBase * 90n) / 100n; // send 90%
+  if (toSendBase <= 0n) {
+    console.log(`[AIRDROP] skipped - no ${AIRDROP_MINT} balance`);
+    return;
+  }
 
-  // 5) Proportional split
+  // 5) Compute proportional split
   const totalEligibleBase = eligible.reduce((a, h) => a + h.amountBase, 0n);
   if (totalEligibleBase <= 0n) return;
 
-  const rows: AirdropRowBase[] = eligible
+  const rows = eligible
     .map((h) => ({
       wallet: h.wallet,
       amountBase: (toSendBase * h.amountBase) / totalEligibleBase,
@@ -531,21 +536,23 @@ async function snapshotAndDistribute() {
 
   if (rows.length === 0) return;
 
-  // 6) Send
-  await sendAirdropsAdaptiveBase(rows, airdropDec);
+  // 6) Send batches
+  console.log(`[AIRDROP] starting ${rows.length} holders, distributing ${(Number(toSendBase) / pow10n(targetDec)).toFixed(2)} tokens`);
+  await sendAirdropsAdaptiveBase(rows, targetDec, targetMintPk);
 
   const totalSent = rows.reduce((a, r) => a + r.amountBase, 0n);
+  console.log(`[AIRDROP] done wallets=${rows.length} totalSentBase=${totalSent}`);
   await recordOps({
     lastAirdrop: {
       at: new Date().toISOString(),
       totalSentBase: totalSent.toString(),
       wallets: rows.length,
-      mint: AIRDROP_MINT,
-      decimals: airdropDec,
+      mint: targetMintPk.toBase58(),
+      decimals: targetDec,
     },
   });
-  console.log(`[AIRDROP] done wallets=${rows.length} totalSentBase=${totalSent.toString()}`);
 }
+
 
 /* ================= Loop ================= */
 async function loop() {
@@ -585,3 +592,4 @@ loop().catch(() => {
   console.error("bananaWorker crashed");
   process.exit(1);
 });
+
