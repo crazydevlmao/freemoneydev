@@ -12,14 +12,13 @@ import {
   getMint,
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountIdempotentInstruction,
-  createTransferCheckedInstruction
+  createBurnCheckedInstruction
 } from "@solana/spl-token";
 import bs58 from "bs58";
 
 /* ================= CONFIG ================= */
 const CYCLE_MINUTES = 1;
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
-const AIRDROP_MINT = process.env.AIRDROP_MINT || "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn";
 const REWARD_WALLET = process.env.REWARD_WALLET || "";
 const DEV_WALLET_PRIVATE_KEY = process.env.DEV_WALLET_PRIVATE_KEY || "";
 const HELIUS_RPC = process.env.HELIUS_RPC || "";
@@ -35,10 +34,6 @@ const JUP_MAX_TRIES = Number(process.env.JUP_MAX_TRIES ?? 6);
 const JUP_429_SLEEP_MS = Number(process.env.JUP_429_SLEEP_MS ?? 1000);
 const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPORTS ?? 5_000);
 const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 400_000);
-
-const AIRDROP_BATCH_SIZE = Number(process.env.AIRDROP_BATCH_SIZE ?? 8);
-const AIRDROP_MAX_BATCH_RETRIES = Number(process.env.AIRDROP_MAX_BATCH_RETRIES ?? 3);
-const AIRDROP_MIN_TX_GAP_MS = Number(process.env.AIRDROP_MIN_TX_GAP_MS ?? 1200);
 
 if (!TRACKED_MINT || !REWARD_WALLET || !DEV_WALLET_PRIVATE_KEY)
   throw new Error("Missing TRACKED_MINT, REWARD_WALLET, or DEV_WALLET_PRIVATE_KEY");
@@ -56,8 +51,7 @@ function toKeypair(secret: string) {
   catch { return Keypair.fromSecretKey(bs58.decode(secret)); }
 }
 const devWallet = toKeypair(DEV_WALLET_PRIVATE_KEY);
-const holdersMintPk = new PublicKey(TRACKED_MINT);
-const airdropMintPk = new PublicKey(AIRDROP_MINT);
+const trackedMintPk = new PublicKey(TRACKED_MINT);
 
 /* ================= UTILS ================= */
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -194,110 +188,17 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
   throw new Error("swap_failed");
 }
 
-/* ================= HOLDERS ================= */
-async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: string; amountBase: bigint }>> {
-  async function scan(pid: string, filter165 = false) {
-    const filters: any[] = [{ memcmp: { offset: 0, bytes: mint.toBase58() } }];
-    if (filter165) filters.unshift({ dataSize: 165 });
-    const accs = await withRetries((c: Connection) =>
-      c.getParsedProgramAccounts(new PublicKey(pid), { filters })
-    );
-    const map = new Map<string, bigint>();
-    for (const it of accs as any[]) {
-      const info = (it as any).account.data.parsed.info;
-      const owner = info?.owner as string | undefined;
-      const amt = BigInt(info?.tokenAmount?.amount || "0");
-      if (!owner || amt <= 0n) continue;
-      map.set(owner, (map.get(owner) ?? 0n) + amt);
-    }
-    return map;
-  }
-  const out = new Map<string, bigint>();
-  try { for (const [k, v] of await scan(TOKEN_PROGRAM_ID.toBase58(), true)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
-  try { for (const [k, v] of await scan(TOKEN_2022_PROGRAM_ID.toBase58(), false)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
-  return Array.from(out.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
-}
-
-/* ================= AIRDROP ================= */
-async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
-  const seen = new Set<string>();
-  const holders = holdersIn.filter(w => {
-    if (!w) return false;
-    if (w === devWallet.publicKey.toBase58()) return false;
-    if (seen.has(w)) return false;
-    seen.add(w);
-    return true;
-  });
-  if (!holders.length) return console.log("⚪ [AIRDROP] No holders.");
-
-  const info = await withRetries(c => c.getAccountInfo(mint, "confirmed"), 5);
-  if (!info) throw new Error("Mint account not found");
-  const is22 = info.owner.equals(TOKEN_2022_PROGRAM_ID);
-  const tokenProgram = is22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
-  const mintInfo = await withRetries(c => getMint(c, mint, "confirmed", tokenProgram), 5);
-  const decimals = mintInfo.decimals;
-
-  const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
-  if (poolBase <= 0n) return console.log("⚪ [AIRDROP] No token balance.");
-
-  const toSend = (poolBase * 90n) / 100n;
-  const perHolder = toSend / BigInt(holders.length);
-  if (perHolder <= 0n) return console.log("⚪ [AIRDROP] Nothing to send.");
-
-  console.log(`🎯 [AIRDROP] ${holders.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
-
-  const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
-  const BATCH = Math.max(3, Math.min(AIRDROP_BATCH_SIZE, 6));
-
-  for (let i = 0; i < holders.length; i += BATCH) {
-    const group = holders.slice(i, i + BATCH);
-    const ixs: any[] = [
-      createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID)
-    ];
-
-    for (const w of group) {
-      try {
-        const to = new PublicKey(w);
-        const toAta = getAssociatedTokenAddressSync(mint, to, true, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
-        ixs.push(
-          createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, to, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID),
-          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, decimals, [], tokenProgram)
-        );
-      } catch (e) {
-        console.warn(`[AIRDROP] invalid ${w}: ${String((e as any)?.message || e)}`);
-      }
-    }
-
-    if (ixs.length <= 1) continue;
-    try {
-      const tx = new Transaction();
-      tx.add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }),
-        ...ixs
-      );
-      tx.feePayer = devWallet.publicKey;
-      const { blockhash } = await connection.getLatestBlockhash("confirmed");
-      tx.recentBlockhash = blockhash;
-      tx.sign(devWallet);
-      const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-      await connection.confirmTransaction(sig, "confirmed");
-      console.log(`✅ [AIRDROP] Sent batch ${group.length} | Tx: ${sig}`);
-    } catch (e: any) {
-      console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
-    }
-  }
-
-  console.log("🎉 [AIRDROP] Complete.");
-}
-
-/* ================= CLAIM / SWAP / LOOP ================= */
+/* ================= CLAIM / SWAP / BURN LOOP ================= */
 let lastClaimState: null | { claimedSol: number; claimSig: string | null } = null;
 
 async function triggerClaimAtStart() {
   console.log("💰 [CLAIM] Collecting creator fees...");
   const preSol = await getSolBalance(connection, devWallet.publicKey);
-  const { res, json } = await callPumportal("/api/trade", { action: "collectCreatorFee", priorityFee: 0.000001, pool: "pump", mint: TRACKED_MINT }, `claim:${Date.now()}`);
+  const { res, json } = await callPumportal(
+    "/api/trade",
+    { action: "collectCreatorFee", priorityFee: 0.000001, pool: "pump", mint: TRACKED_MINT },
+    `claim:${Date.now()}`
+  );
   if (!res.ok) throw new Error(`Claim failed ${res.status}`);
   const claimSig = extractSig(json);
   await sleep(3000);
@@ -307,35 +208,60 @@ async function triggerClaimAtStart() {
   lastClaimState = { claimedSol: delta, claimSig };
 }
 
-async function triggerSwap() {
+async function triggerSwapAndBurn() {
   console.log("🔄 [SWAP] Initiating swap check...");
 
-  // Use only the last claimed SOL from claim stage
   const claimed = lastClaimState?.claimedSol ?? 0;
   if (claimed <= 0.000001) {
     console.log("⚪ [SWAP] Skipped — no new SOL claimed this cycle.");
     return;
   }
 
-  // Swap 70% of that claimed SOL
   const spend = claimed * 0.7;
   console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
 
   try {
-    const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
+    // Swap SOL → TRACKED_MINT
+    const q = await jupQuoteSolToToken(TRACKED_MINT, spend, 300);
     const sig = await jupSwap(connection, devWallet, q);
-    console.log(`✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${AIRDROP_MINT} | Tx: ${sig}`);
+    console.log(`✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${TRACKED_MINT} | Tx: ${sig}`);
+
+    // Burn all TRACKED_MINT held
+    console.log("🔥 [BURN] Burning all TRACKED_MINT tokens...");
+    const mint = new PublicKey(TRACKED_MINT);
+    const mintInfo = await getMint(connection, mint, "confirmed", TOKEN_PROGRAM_ID);
+    const decimals = mintInfo.decimals;
+    const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
+    const bal = await tokenBalanceBase(devWallet.publicKey, mint);
+
+    if (bal > 0n) {
+      const burnIx = createBurnCheckedInstruction(
+        fromAta,
+        mint,
+        devWallet.publicKey,
+        Number(bal),
+        decimals,
+        [],
+        TOKEN_PROGRAM_ID
+      );
+      const tx = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }),
+        burnIx
+      );
+      tx.feePayer = devWallet.publicKey;
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      tx.recentBlockhash = blockhash;
+      tx.sign(devWallet);
+      const burnSig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+      await connection.confirmTransaction(burnSig, "confirmed");
+      console.log(`🔥 [BURN] Burned ${(Number(bal) / 10 ** decimals).toFixed(6)} TRACKED_MINT | Tx: ${burnSig}`);
+    } else {
+      console.log("⚪ [BURN] No TRACKED_MINT to burn.");
+    }
   } catch (e: any) {
-    console.error(`❌ [SWAP] Failed: ${e?.message || e}`);
+    console.error(`❌ [SWAP/BURN] Failed: ${e?.message || e}`);
   }
-}
-
-
-async function snapshotAndDistribute() {
-  console.log("🎁 [AIRDROP] Snapshotting holders...");
-  const holders = (await getHoldersAllBase(holdersMintPk)).map((h: any) => h.wallet).filter(Boolean);
-  if (!holders.length) return console.log("⚪ [AIRDROP] No holders found.");
-  await simpleAirdropEqual(airdropMintPk, holders);
 }
 
 async function loop() {
@@ -343,14 +269,11 @@ async function loop() {
     try {
       console.log("\n================= 🚀 NEW CYCLE =================");
       await triggerClaimAtStart();
-      console.log("⏳ 30s pause → next: SWAP");
+      console.log("⏳ 10s pause → next: SWAP & BURN");
+      await sleep(10_000);
+      await triggerSwapAndBurn();
+      console.log("🕐 30s cooldown before next cycle...");
       await sleep(30_000);
-      await triggerSwap();
-      console.log("⏳ 30s pause → next: AIRDROP");
-      await sleep(30_000);
-      await snapshotAndDistribute();
-      console.log("🕐 60s cooldown before next cycle...");
-      await sleep(60_000);
     } catch (e: any) {
       console.error("💥 [CYCLE ERROR]", e?.message || e);
       await sleep(5000);
@@ -362,5 +285,3 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
-
-
