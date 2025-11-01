@@ -156,15 +156,18 @@ async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippage
 }
 
 async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
-  const swapReq = {
-    quoteResponse: quoteResp,
-    userPublicKey: signer.publicKey.toBase58(),
-    wrapAndUnwrapSol: true,
-    dynamicComputeUnitLimit: true,
-    prioritizationFeeLamports: "auto",
-  };
+  let q = quoteResp; // allow refreshing the quote on 0x1771
   for (let i = 0; i < JUP_MAX_TRIES; i++) {
     try {
+      const swapReq = {
+        quoteResponse: q,
+        userPublicKey: signer.publicKey.toBase58(),
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+        prioritizationFeeLamports: "auto",
+        enableAutoSlippage: true
+      };
+
       const jr: any = await fetchJsonQuiet(
         JUP_SWAP,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(swapReq) },
@@ -178,10 +181,43 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
       return sig;
     } catch (e: any) {
       const m = String(e?.message || e);
+
+      // Try to print program logs if present
+      try {
+        if (e?.logs) console.error("🪵 [JUP LOGS]\n" + (Array.isArray(e.logs) ? e.logs.join("\n") : String(e.logs)));
+        else if (e?.getLogs) {
+          const logs = await e.getLogs();
+          if (logs) console.error("🪵 [JUP LOGS]\n" + (Array.isArray(logs) ? logs.join("\n") : String(logs)));
+        }
+      } catch {}
+
+      // Handle transient and rate-limit errors
       if (m === "HTTP_429" || looksRetryable(m)) {
         await sleep(JUP_429_SLEEP_MS * (i + 1));
         continue;
       }
+
+      // Handle Jupiter route invalid or min out not met: refresh quote, then retry
+      if (m.includes("0x1771")) {
+        try {
+          // Derive a fresh quote using the same parameters
+          const outMint =
+            q?.outputMint || q?.routePlan?.[q?.routePlan?.length - 1]?.swapInfo?.outputMint || TRACKED_MINT;
+          // Prefer explicit inAmount from quote if present; fallback to user intent is not changed
+          const inLamportsStr = q?.inAmount ?? q?.amount ?? q?.otherAmount;
+          const inLamports = typeof inLamportsStr === "string" ? Number(inLamportsStr) : Number(inLamportsStr || 0);
+          const solUiAmount = inLamports > 0 ? inLamports / LAMPORTS_PER_SOL : 0;
+          if (outMint && solUiAmount > 0) {
+            console.warn("⚠️ [JUP] Route failed (0x1771). Fetching fresh quote and retrying...");
+            q = await jupQuoteSolToToken(outMint, solUiAmount, 300);
+            await sleep(500);
+            continue;
+          }
+        } catch {}
+        await sleep(700);
+        continue;
+      }
+
       if (i === JUP_MAX_TRIES - 1) throw e;
     }
   }
@@ -254,7 +290,13 @@ async function triggerSwapAndBurn() {
       tx.recentBlockhash = blockhash;
       tx.sign(devWallet);
       const burnSig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-      await connection.confirmTransaction(burnSig, "confirmed");
+
+      // robust confirmation for congested network
+      await withRetries(async c => {
+        await c.confirmTransaction(burnSig, "finalized");
+        return true;
+      }, 3);
+
       console.log(`🔥 [BURN] Burned ${(Number(bal) / 10 ** decimals).toFixed(6)} TRACKED_MINT | Tx: ${burnSig}`);
     } else {
       console.log("⚪ [BURN] No TRACKED_MINT to burn.");
