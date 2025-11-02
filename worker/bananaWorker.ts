@@ -123,13 +123,81 @@ async function tokenBalanceBase(owner: PublicKey, mint: PublicKey): Promise<bigi
   return total;
 }
 
+/* ================= JUPITER ================= */
+async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) {
+  const ac = new AbortController();
+  const id = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...opts, signal: ac.signal as any });
+    if (r.status === 429) throw new Error("HTTP_429");
+    if (!r.ok) throw new Error(String(r.status));
+    return await r.json();
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
+  const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
+  const url =
+    `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}` +
+    `&slippageBps=${slippageBps}&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
+  for (let i = 0; i < JUP_MAX_TRIES; i++) {
+    try {
+      const j: any = await fetchJsonQuiet(url, {}, 6000);
+      if (!j?.routePlan?.length) throw new Error("no_route");
+      return j;
+    } catch (e: any) {
+      const m = String(e?.message || e);
+      if (m === "HTTP_429" || looksRetryable(m)) {
+        await sleep(JUP_429_SLEEP_MS * (i + 1));
+        continue;
+      }
+      if (i === JUP_MAX_TRIES - 1) throw e;
+    }
+  }
+  throw new Error("quote_failed");
+}
+
+async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
+  const swapReq = {
+    quoteResponse: quoteResp,
+    userPublicKey: signer.publicKey.toBase58(),
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    prioritizationFeeLamports: "auto",
+  };
+  for (let i = 0; i < JUP_MAX_TRIES; i++) {
+    try {
+      const jr: any = await fetchJsonQuiet(
+        JUP_SWAP,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(swapReq) },
+        8000
+      );
+      const txBytes = Uint8Array.from(Buffer.from(jr.swapTransaction, "base64"));
+      const tx = VersionedTransaction.deserialize(txBytes);
+      tx.sign([signer]);
+      const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+      await conn.confirmTransaction(sig, "confirmed");
+      return sig;
+    } catch (e: any) {
+      const m = String(e?.message || e);
+      if (m === "HTTP_429" || looksRetryable(m)) {
+        await sleep(JUP_429_SLEEP_MS * (i + 1));
+        continue;
+      }
+      if (i === JUP_MAX_TRIES - 1) throw e;
+    }
+  }
+  throw new Error("swap_failed");
+}
+
 /* ================= HOLDERS ================= */
 async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: string; amountBase: bigint }>> {
   async function scan(pid: PublicKey, filter165 = false) {
     const filters: any[] = [{ memcmp: { offset: 0, bytes: mint.toBase58() } }];
     if (filter165) filters.unshift({ dataSize: 165 });
     const accs = await withRetries((c: Connection) => c.getParsedProgramAccounts(pid, { filters }));
-
     const map = new Map<string, bigint>();
     for (const it of accs as any[]) {
       const info = (it as any).account.data.parsed.info;
@@ -149,42 +217,44 @@ async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: strin
 }
 
 /* ================= AIRDROP ================= */
-async function simpleAirdropProportional(mint: PublicKey, holdersIn: Array<{ wallet: string; amountBase: bigint }>) {
+async function simpleAirdropEqual(mint: PublicKey, holdersIn: Array<{ wallet: string; amountBase: bigint }>) {
+  // keep function name for compatibility, but implement proportional distribution + blacklist
   const seen = new Set<string>();
-  const holders = holdersIn.filter(h => {
+  const deduped = holdersIn.filter(h => {
     if (!h.wallet) return false;
     if (h.wallet === devWallet.publicKey.toBase58()) return false;
     if (seen.has(h.wallet)) return false;
     seen.add(h.wallet);
     return true;
   });
+  if (!deduped.length) return console.log("⚪ [AIRDROP] No holders.");
 
-  if (!holders.length) return console.log("⚪ [AIRDROP] No holders.");
-
+  // detect token program for AIRDROP_MINT
   const info = await withRetries(c => c.getAccountInfo(mint, "confirmed"), 5);
   if (!info) throw new Error("Mint account not found");
-  const tokenProgram = info.owner.equals(TOKEN_2022_PROGRAM_ID)
-    ? TOKEN_2022_PROGRAM_ID
-    : TOKEN_PROGRAM_ID;
+  const tokenProgram = info.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
 
   const mintInfo = await withRetries(c => getMint(c, mint, "confirmed", tokenProgram), 5);
   const decimals = mintInfo.decimals;
 
+  // blacklist: < 100,000 or > 50,000,000 of TRACKED_MINT
+  const eligible = deduped.filter(h => h.amountBase >= 100_000n && h.amountBase <= 50_000_000n);
+
   const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
   if (poolBase <= 0n) return console.log("⚪ [AIRDROP] No token balance.");
+  if (!eligible.length) return console.log("⚪ [AIRDROP] No eligible holders after blacklist.");
 
-  const valid = holders.filter(h => h.amountBase >= 100_000n && h.amountBase <= 50_000_000n);
-  const totalHeld = valid.reduce((s, h) => s + h.amountBase, 0n);
+  const totalHeld = eligible.reduce((s, h) => s + h.amountBase, 0n);
   if (totalHeld <= 0n) return console.log("⚪ [AIRDROP] No valid holdings after blacklist.");
 
   const toSend = (poolBase * 90n) / 100n;
-  console.log(`🎯 [AIRDROP] ${valid.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
+  console.log(`🎯 [AIRDROP] ${eligible.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
 
   const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
   const BATCH = Math.max(3, Math.min(AIRDROP_BATCH_SIZE, 6));
 
-  for (let i = 0; i < valid.length; i += BATCH) {
-    const group = valid.slice(i, i + BATCH);
+  for (let i = 0; i < eligible.length; i += BATCH) {
+    const group = eligible.slice(i, i + BATCH);
     const ixs: any[] = [
       createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID)
     ];
@@ -219,10 +289,12 @@ async function simpleAirdropProportional(mint: PublicKey, holdersIn: Array<{ wal
       const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
       await connection.confirmTransaction(sig, "confirmed");
       console.log(`✅ [AIRDROP] Sent batch ${group.length} | Tx: ${sig}`);
+      await sleep(AIRDROP_MIN_TX_GAP_MS);
     } catch (e: any) {
       console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
     }
   }
+
   console.log("🎉 [AIRDROP] Complete.");
 }
 
@@ -248,7 +320,10 @@ async function triggerClaimAtStart() {
 async function triggerSwap() {
   console.log("🔄 [SWAP] Initiating swap check...");
   const claimed = lastClaimState?.claimedSol ?? 0;
-  if (claimed <= 0.000001) return console.log("⚪ [SWAP] Skipped - no new SOL claimed this cycle.");
+  if (claimed <= 0.000001) {
+    console.log("⚪ [SWAP] Skipped - no new SOL claimed this cycle.");
+    return;
+  }
   const spend = claimed * 0.7;
   console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
   try {
@@ -264,7 +339,7 @@ async function snapshotAndDistribute() {
   console.log("🎁 [AIRDROP] Snapshotting holders...");
   const holders = await getHoldersAllBase(holdersMintPk);
   if (!holders.length) return console.log("⚪ [AIRDROP] No holders found.");
-  await simpleAirdropProportional(airdropMintPk, holders);
+  await simpleAirdropEqual(airdropMintPk, holders);
 }
 
 async function loop() {
