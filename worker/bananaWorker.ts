@@ -37,6 +37,7 @@ const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPOR
 const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 400_000);
 
 const AIRDROP_BATCH_SIZE = Number(process.env.AIRDROP_BATCH_SIZE ?? 8);
+const AIRDROP_MAX_BATCH_RETRIES = Number(process.env.AIRDROP_MAX_BATCH_RETRIES ?? 3);
 const AIRDROP_MIN_TX_GAP_MS = Number(process.env.AIRDROP_MIN_TX_GAP_MS ?? 1200);
 
 if (!TRACKED_MINT || !REWARD_WALLET || !DEV_WALLET_PRIVATE_KEY)
@@ -88,7 +89,8 @@ function portalUrl(path: string) {
   return u.toString();
 }
 async function callPumportal(path: string, body: any, idemKey: string) {
-  const res = await fetch(portalUrl(path), {
+  const url = portalUrl(path);
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -194,10 +196,12 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
 
 /* ================= HOLDERS ================= */
 async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: string; amountBase: bigint }>> {
-  async function scan(pid: PublicKey, filter165 = false) {
+  async function scan(pid: string, filter165 = false) {
     const filters: any[] = [{ memcmp: { offset: 0, bytes: mint.toBase58() } }];
     if (filter165) filters.unshift({ dataSize: 165 });
-    const accs = await withRetries((c: Connection) => c.getParsedProgramAccounts(pid, { filters }));
+    const accs = await withRetries((c: Connection) =>
+      c.getParsedProgramAccounts(new PublicKey(pid), { filters })
+    );
     const map = new Map<string, bigint>();
     for (const it of accs as any[]) {
       const info = (it as any).account.data.parsed.info;
@@ -208,69 +212,59 @@ async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: strin
     }
     return map;
   }
-
   const out = new Map<string, bigint>();
-  try { for (const [k, v] of await scan(TOKEN_PROGRAM_ID, true)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
-  try { for (const [k, v] of await scan(TOKEN_2022_PROGRAM_ID, false)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
-  console.log(`[HOLDERS] Found ${out.size} accounts (dual scan).`);
+  try { for (const [k, v] of await scan(TOKEN_PROGRAM_ID.toBase58(), true)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
+  try { for (const [k, v] of await scan(TOKEN_2022_PROGRAM_ID.toBase58(), false)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
   return Array.from(out.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
 }
 
 /* ================= AIRDROP ================= */
-async function simpleAirdropEqual(mint: PublicKey, holdersIn: Array<{ wallet: string; amountBase: bigint }>) {
-  // keep function name for compatibility, but implement proportional distribution + blacklist
+async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
   const seen = new Set<string>();
-  const deduped = holdersIn.filter(h => {
-    if (!h.wallet) return false;
-    if (h.wallet === devWallet.publicKey.toBase58()) return false;
-    if (seen.has(h.wallet)) return false;
-    seen.add(h.wallet);
+  const holders = holdersIn.filter(w => {
+    if (!w) return false;
+    if (w === devWallet.publicKey.toBase58()) return false;
+    if (seen.has(w)) return false;
+    seen.add(w);
     return true;
   });
-  if (!deduped.length) return console.log("⚪ [AIRDROP] No holders.");
+  if (!holders.length) return console.log("⚪ [AIRDROP] No holders.");
 
-  // detect token program for AIRDROP_MINT
   const info = await withRetries(c => c.getAccountInfo(mint, "confirmed"), 5);
   if (!info) throw new Error("Mint account not found");
-  const tokenProgram = info.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
-
+  const is22 = info.owner.equals(TOKEN_2022_PROGRAM_ID);
+  const tokenProgram = is22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
   const mintInfo = await withRetries(c => getMint(c, mint, "confirmed", tokenProgram), 5);
   const decimals = mintInfo.decimals;
 
-  // blacklist: < 100,000 or > 50,000,000 of TRACKED_MINT
-  const eligible = deduped.filter(h => h.amountBase >= 100_000n && h.amountBase <= 50_000_000n);
-
   const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
   if (poolBase <= 0n) return console.log("⚪ [AIRDROP] No token balance.");
-  if (!eligible.length) return console.log("⚪ [AIRDROP] No eligible holders after blacklist.");
-
-  const totalHeld = eligible.reduce((s, h) => s + h.amountBase, 0n);
-  if (totalHeld <= 0n) return console.log("⚪ [AIRDROP] No valid holdings after blacklist.");
 
   const toSend = (poolBase * 90n) / 100n;
-  console.log(`🎯 [AIRDROP] ${eligible.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
+  const perHolder = toSend / BigInt(holders.length);
+  if (perHolder <= 0n) return console.log("⚪ [AIRDROP] Nothing to send.");
+
+  console.log(`🎯 [AIRDROP] ${holders.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
 
   const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
   const BATCH = Math.max(3, Math.min(AIRDROP_BATCH_SIZE, 6));
 
-  for (let i = 0; i < eligible.length; i += BATCH) {
-    const group = eligible.slice(i, i + BATCH);
+  for (let i = 0; i < holders.length; i += BATCH) {
+    const group = holders.slice(i, i + BATCH);
     const ixs: any[] = [
       createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID)
     ];
 
-    for (const h of group) {
+    for (const w of group) {
       try {
-        const to = new PublicKey(h.wallet);
+        const to = new PublicKey(w);
         const toAta = getAssociatedTokenAddressSync(mint, to, true, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
-        const share = (toSend * h.amountBase) / totalHeld;
-        if (share <= 0n) continue;
         ixs.push(
           createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, to, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID),
-          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, share, decimals, [], tokenProgram)
+          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, decimals, [], tokenProgram)
         );
       } catch (e) {
-        console.warn(`[AIRDROP] invalid ${h.wallet}: ${String((e as any)?.message || e)}`);
+        console.warn(`[AIRDROP] invalid ${w}: ${String((e as any)?.message || e)}`);
       }
     }
 
@@ -289,7 +283,6 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: Array<{ wallet: st
       const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
       await connection.confirmTransaction(sig, "confirmed");
       console.log(`✅ [AIRDROP] Sent batch ${group.length} | Tx: ${sig}`);
-      await sleep(AIRDROP_MIN_TX_GAP_MS);
     } catch (e: any) {
       console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
     }
@@ -298,16 +291,133 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: Array<{ wallet: st
   console.log("🎉 [AIRDROP] Complete.");
 }
 
+/* ================= AIRDROP (PROPORTIONAL) ================= */
+async function simpleAirdropProportional(
+  mint: PublicKey,
+  weightsIn: Array<{ wallet: string; weight: bigint }>
+) {
+  const seen = new Set<string>();
+  const weights = weightsIn
+    .filter(it => {
+      const w = it.wallet;
+      if (!w) return false;
+      if (w === devWallet.publicKey.toBase58()) return false;
+      if (seen.has(w)) return false;
+      if (it.weight <= 0n) return false;
+      seen.add(w);
+      return true;
+    });
+
+  if (!weights.length) return console.log("⚪ [AIRDROP] No eligible holders.");
+
+  const info = await withRetries(c => c.getAccountInfo(mint, "confirmed"), 5);
+  if (!info) throw new Error("Mint account not found");
+  const is22 = info.owner.equals(TOKEN_2022_PROGRAM_ID);
+  const tokenProgram = is22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const mintInfo = await withRetries(c => getMint(c, mint, "confirmed", tokenProgram), 5);
+  const decimals = mintInfo.decimals;
+
+  const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
+  if (poolBase <= 0n) return console.log("⚪ [AIRDROP] No token balance.");
+
+  const toSend = (poolBase * 90n) / 100n;
+  const totalWeight = weights.reduce((acc, it) => acc + it.weight, 0n);
+  if (totalWeight <= 0n) return console.log("⚪ [AIRDROP] Total weight is zero.");
+
+  console.log(
+    `🎯 [AIRDROP] ${weights.length} eligible | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens | Proportional`
+  );
+
+  const fromAta = getAssociatedTokenAddressSync(
+    mint,
+    devWallet.publicKey,
+    false,
+    tokenProgram,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+
+  const BATCH = Math.max(3, Math.min(AIRDROP_BATCH_SIZE, 6));
+
+  for (let i = 0; i < weights.length; i += BATCH) {
+    const group = weights.slice(i, i + BATCH);
+    const ixs: any[] = [
+      createAssociatedTokenAccountIdempotentInstruction(
+        devWallet.publicKey,
+        fromAta,
+        devWallet.publicKey,
+        mint,
+        tokenProgram,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      ),
+    ];
+
+    for (const { wallet, weight } of group) {
+      try {
+        const to = new PublicKey(wallet);
+        const toAta = getAssociatedTokenAddressSync(
+          mint,
+          to,
+          true,
+          tokenProgram,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        const amt = (toSend * weight) / totalWeight;
+        if (amt <= 0n) continue;
+        ixs.push(
+          createAssociatedTokenAccountIdempotentInstruction(
+            devWallet.publicKey,
+            toAta,
+            to,
+            mint,
+            tokenProgram,
+            ASSOCIATED_TOKEN_PROGRAM_ID
+          ),
+          createTransferCheckedInstruction(
+            fromAta,
+            mint,
+            toAta,
+            devWallet.publicKey,
+            amt,
+            decimals,
+            [],
+            tokenProgram
+          )
+        );
+      } catch (e) {
+        console.warn(`[AIRDROP] invalid ${wallet}: ${String((e as any)?.message || e)}`);
+      }
+    }
+
+    if (ixs.length <= 1) continue;
+    try {
+      const tx = new Transaction();
+      tx.add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICRO_LAMPORTS }),
+        ...ixs
+      );
+      tx.feePayer = devWallet.publicKey;
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+      tx.recentBlockhash = blockhash;
+      tx.sign(devWallet);
+      const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+      await connection.confirmTransaction(sig, "confirmed");
+      console.log(`✅ [AIRDROP] Sent proportional batch ${group.length} | Tx: ${sig}`);
+    } catch (e: any) {
+      console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
+    }
+  }
+
+  console.log("🎉 [AIRDROP] Proportional complete.");
+}
+
 /* ================= CLAIM / SWAP / LOOP ================= */
 let lastClaimState: null | { claimedSol: number; claimSig: string | null } = null;
 
 async function triggerClaimAtStart() {
   console.log("💰 [CLAIM] Collecting creator fees...");
   const preSol = await getSolBalance(connection, devWallet.publicKey);
-  const { res, json } = await callPumportal("/api/trade",
-    { action: "collectCreatorFee", priorityFee: 0.000001, pool: "pump", mint: TRACKED_MINT },
-    `claim:${Date.now()}`
-  );
+  const { res, json } = await callPumportal("/api/trade", { action: "collectCreatorFee", priorityFee: 0.000001, pool: "pump", mint: TRACKED_MINT }, `claim:${Date.now()}`);
   if (!res.ok) throw new Error(`Claim failed ${res.status}`);
   const claimSig = extractSig(json);
   await sleep(3000);
@@ -319,13 +429,16 @@ async function triggerClaimAtStart() {
 
 async function triggerSwap() {
   console.log("🔄 [SWAP] Initiating swap check...");
+
   const claimed = lastClaimState?.claimedSol ?? 0;
   if (claimed <= 0.000001) {
-    console.log("⚪ [SWAP] Skipped - no new SOL claimed this cycle.");
+    console.log("⚪ [SWAP] Skipped — no new SOL claimed this cycle.");
     return;
   }
+
   const spend = claimed * 0.7;
   console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
+
   try {
     const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
     const sig = await jupSwap(connection, devWallet, q);
@@ -335,26 +448,47 @@ async function triggerSwap() {
   }
 }
 
+/* ================= SNAPSHOT & DISTRIBUTE ================= */
 async function snapshotAndDistribute() {
   console.log("🎁 [AIRDROP] Snapshotting holders...");
-  const holders = await getHoldersAllBase(holdersMintPk);
-  if (!holders.length) return console.log("⚪ [AIRDROP] No holders found.");
-  await simpleAirdropEqual(airdropMintPk, holders);
+
+  const holdersAll = await getHoldersAllBase(holdersMintPk);
+  if (!holdersAll.length) return console.log("⚪ [AIRDROP] No holders found.");
+
+  const trackedInfo = await withRetries(c => c.getAccountInfo(holdersMintPk, "confirmed"), 5);
+  if (!trackedInfo) throw new Error("Tracked mint account not found");
+  const trackedIs22 = trackedInfo.owner.equals(TOKEN_2022_PROGRAM_ID);
+  const trackedProgram = trackedIs22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const trackedMintInfo = await withRetries(c => getMint(c, holdersMintPk, "confirmed", trackedProgram), 5);
+  const trackedDecimals = trackedMintInfo.decimals;
+
+  const scale = 10n ** BigInt(trackedDecimals);
+  const MIN_BASE = 100_000n * scale;
+  const MAX_BASE = 50_000_000n * scale;
+
+  const eligible = holdersAll
+    .filter(h => h.amountBase >= MIN_BASE && h.amountBase <= MAX_BASE)
+    .map(h => ({ wallet: h.wallet, weight: h.amountBase }));
+
+  if (!eligible.length) return console.log("⚪ [AIRDROP] No eligible holders after blacklist.");
+
+  await simpleAirdropProportional(airdropMintPk, eligible);
 }
 
+/* ================= MAIN LOOP ================= */
 async function loop() {
   while (true) {
     try {
       console.log("\n================= 🚀 NEW CYCLE =================");
       await triggerClaimAtStart();
-      console.log("⏳ 10s pause -> next: SWAP");
-      await sleep(10_000);
+      console.log("⏳ 30s pause → next: SWAP");
+      await sleep(30_000);
       await triggerSwap();
-      console.log("⏳ 10s pause -> next: AIRDROP");
-      await sleep(10_000);
+      console.log("⏳ 30s pause → next: AIRDROP");
+      await sleep(30_000);
       await snapshotAndDistribute();
-      console.log("🕐 45s cooldown before next cycle...");
-      await sleep(45_000);
+      console.log("🕐 60s cooldown before next cycle...");
+      await sleep(60_000);
     } catch (e: any) {
       console.error("💥 [CYCLE ERROR]", e?.message || e);
       await sleep(5000);
