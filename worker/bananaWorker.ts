@@ -6,7 +6,6 @@ import {
   LAMPORTS_PER_SOL, ComputeBudgetProgram
 } from "@solana/web3.js";
 import {
-  TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   getMint,
@@ -115,7 +114,7 @@ async function getSolBalance(conn: Connection, pubkey: PublicKey) {
 
 async function tokenBalanceBase(owner: PublicKey, mint: PublicKey): Promise<bigint> {
   const resp = await withRetries((c: Connection) =>
-    c.getParsedTokenAccountsByOwner(owner, { mint }, "confirmed")
+    c.getParsedTokenAccountsByOwner(owner, { mint, programId: TOKEN_2022_PROGRAM_ID }, "confirmed")
   );
   let total = 0n;
   for (const it of (resp as any).value) {
@@ -130,7 +129,7 @@ async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) 
   const ac = new AbortController();
   const id = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { ...opts, signal: (ac.signal as any) });
+    const r = await fetch(url, { ...opts, signal: ac.signal as any });
     if (r.status === 429) throw new Error("HTTP_429");
     if (!r.ok) throw new Error(String(r.status));
     return await r.json();
@@ -196,26 +195,21 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
 
 /* ================= HOLDERS ================= */
 async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: string; amountBase: bigint }>> {
-  async function scan(pid: string, filter165 = false) {
-    const filters: any[] = [{ memcmp: { offset: 0, bytes: mint.toBase58() } }];
-    if (filter165) filters.unshift({ dataSize: 165 });
-    const accs = await withRetries((c: Connection) =>
-      c.getParsedProgramAccounts(new PublicKey(pid), { filters })
-    );
-    const map = new Map<string, bigint>();
-    for (const it of accs as any[]) {
-      const info = (it as any).account.data.parsed.info;
-      const owner = info?.owner as string | undefined;
-      const amt = BigInt(info?.tokenAmount?.amount || "0");
-      if (!owner || amt <= 0n) continue;
-      map.set(owner, (map.get(owner) ?? 0n) + amt);
-    }
-    return map;
+  const filters = [{ memcmp: { offset: 0, bytes: mint.toBase58() } }];
+  const accs = await withRetries((c: Connection) =>
+    c.getParsedProgramAccounts(TOKEN_2022_PROGRAM_ID, { filters })
+  );
+
+  const map = new Map<string, bigint>();
+  for (const it of accs as any[]) {
+    const info = (it as any).account.data.parsed.info;
+    const owner = info?.owner as string | undefined;
+    const amt = BigInt(info?.tokenAmount?.amount || "0");
+    if (!owner || amt <= 0n) continue;
+    map.set(owner, (map.get(owner) ?? 0n) + amt);
   }
-  const out = new Map<string, bigint>();
-  try { for (const [k, v] of await scan(TOKEN_PROGRAM_ID.toBase58(), true)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
-  try { for (const [k, v] of await scan(TOKEN_2022_PROGRAM_ID.toBase58(), false)) out.set(k, (out.get(k) ?? 0n) + v); } catch {}
-  return Array.from(out.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
+  console.log(`[HOLDERS] Found ${map.size} Token-2022 accounts.`);
+  return Array.from(map.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
 }
 
 /* ================= AIRDROP ================= */
@@ -230,10 +224,7 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: Array<{ wallet: st
   });
   if (!holders.length) return console.log("⚪ [AIRDROP] No holders.");
 
-  const info = await withRetries(c => c.getAccountInfo(mint, "confirmed"), 5);
-  if (!info) throw new Error("Mint account not found");
-  const is22 = info.owner.equals(TOKEN_2022_PROGRAM_ID);
-  const tokenProgram = is22 ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+  const tokenProgram = TOKEN_2022_PROGRAM_ID;
   const mintInfo = await withRetries(c => getMint(c, mint, "confirmed", tokenProgram), 5);
   const decimals = mintInfo.decimals;
 
@@ -311,7 +302,6 @@ async function triggerClaimAtStart() {
 
 async function triggerSwap() {
   console.log("🔄 [SWAP] Initiating swap check...");
-
   const claimed = lastClaimState?.claimedSol ?? 0;
   if (claimed <= 0.000001) {
     console.log("⚪ [SWAP] Skipped - no new SOL claimed this cycle.");
@@ -320,7 +310,6 @@ async function triggerSwap() {
 
   const spend = claimed * 0.7;
   console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
-
   try {
     const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
     const sig = await jupSwap(connection, devWallet, q);
@@ -332,10 +321,8 @@ async function triggerSwap() {
 
 async function snapshotAndDistribute() {
   console.log("🎁 [AIRDROP] Snapshotting holders...");
-  // Apply blacklist: exclude balances < 100,000 and > 50,000,000 of TRACKED_MINT
   const holders = (await getHoldersAllBase(holdersMintPk))
     .filter(h => h.amountBase >= 100_000n && h.amountBase <= 50_000_000n);
-
   if (!holders.length) return console.log("⚪ [AIRDROP] No holders found.");
   await simpleAirdropEqual(airdropMintPk, holders);
 }
