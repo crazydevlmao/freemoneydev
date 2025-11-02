@@ -130,7 +130,7 @@ async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) 
   const ac = new AbortController();
   const id = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { ...opts, signal: ac.signal as any });
+    const r = await fetch(url, { ...opts, signal: (ac.signal as any) });
     if (r.status === 429) throw new Error("HTTP_429");
     if (!r.ok) throw new Error(String(r.status));
     return await r.json();
@@ -314,7 +314,7 @@ async function triggerSwap() {
 
   const claimed = lastClaimState?.claimedSol ?? 0;
   if (claimed <= 0.000001) {
-    console.log("⚪ [SWAP] Skipped — no new SOL claimed this cycle.");
+    console.log("⚪ [SWAP] Skipped - no new SOL claimed this cycle.");
     return;
   }
 
@@ -332,7 +332,10 @@ async function triggerSwap() {
 
 async function snapshotAndDistribute() {
   console.log("🎁 [AIRDROP] Snapshotting holders...");
-  const holders = await getHoldersAllBase(holdersMintPk);
+  // Apply blacklist: exclude balances < 100,000 and > 50,000,000 of TRACKED_MINT
+  const holders = (await getHoldersAllBase(holdersMintPk))
+    .filter(h => h.amountBase >= 100_000n && h.amountBase <= 50_000_000n);
+
   if (!holders.length) return console.log("⚪ [AIRDROP] No holders found.");
   await simpleAirdropEqual(airdropMintPk, holders);
 }
@@ -342,14 +345,14 @@ async function loop() {
     try {
       console.log("\n================= 🚀 NEW CYCLE =================");
       await triggerClaimAtStart();
-      console.log("⏳ 30s pause → next: SWAP");
-      await sleep(30_000);
+      console.log("⏳ 10s pause -> next: SWAP");
+      await sleep(10_000);
       await triggerSwap();
-      console.log("⏳ 30s pause → next: AIRDROP");
-      await sleep(30_000);
+      console.log("⏳ 10s pause -> next: AIRDROP");
+      await sleep(10_000);
       await snapshotAndDistribute();
-      console.log("🕐 60s cooldown before next cycle...");
-      await sleep(60_000);
+      console.log("🕐 45s cooldown before next cycle...");
+      await sleep(45_000);
     } catch (e: any) {
       console.error("💥 [CYCLE ERROR]", e?.message || e);
       await sleep(5000);
