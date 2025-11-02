@@ -219,13 +219,13 @@ async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: strin
 }
 
 /* ================= AIRDROP ================= */
-async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
+async function simpleAirdropEqual(mint: PublicKey, holdersIn: Array<{ wallet: string; amountBase: bigint }>) {
   const seen = new Set<string>();
-  const holders = holdersIn.filter(w => {
-    if (!w) return false;
-    if (w === devWallet.publicKey.toBase58()) return false;
-    if (seen.has(w)) return false;
-    seen.add(w);
+  const holders = holdersIn.filter(h => {
+    if (!h.wallet) return false;
+    if (h.wallet === devWallet.publicKey.toBase58()) return false;
+    if (seen.has(h.wallet)) return false;
+    seen.add(h.wallet);
     return true;
   });
   if (!holders.length) return console.log("⚪ [AIRDROP] No holders.");
@@ -241,8 +241,8 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
   if (poolBase <= 0n) return console.log("⚪ [AIRDROP] No token balance.");
 
   const toSend = (poolBase * 90n) / 100n;
-  const perHolder = toSend / BigInt(holders.length);
-  if (perHolder <= 0n) return console.log("⚪ [AIRDROP] Nothing to send.");
+  const totalHeld = holders.reduce((s, h) => s + h.amountBase, 0n);
+  if (totalHeld <= 0n) return console.log("⚪ [AIRDROP] No valid holdings.");
 
   console.log(`🎯 [AIRDROP] ${holders.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
 
@@ -255,16 +255,18 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
       createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, fromAta, devWallet.publicKey, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID)
     ];
 
-    for (const w of group) {
+    for (const h of group) {
       try {
-        const to = new PublicKey(w);
+        const to = new PublicKey(h.wallet);
         const toAta = getAssociatedTokenAddressSync(mint, to, true, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
+        const share = (toSend * h.amountBase) / totalHeld;
+        if (share <= 0n) continue;
         ixs.push(
           createAssociatedTokenAccountIdempotentInstruction(devWallet.publicKey, toAta, to, mint, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID),
-          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, decimals, [], tokenProgram)
+          createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, share, decimals, [], tokenProgram)
         );
       } catch (e) {
-        console.warn(`[AIRDROP] invalid ${w}: ${String((e as any)?.message || e)}`);
+        console.warn(`[AIRDROP] invalid ${h.wallet}: ${String((e as any)?.message || e)}`);
       }
     }
 
@@ -310,14 +312,12 @@ async function triggerClaimAtStart() {
 async function triggerSwap() {
   console.log("🔄 [SWAP] Initiating swap check...");
 
-  // Use only the last claimed SOL from claim stage
   const claimed = lastClaimState?.claimedSol ?? 0;
   if (claimed <= 0.000001) {
     console.log("⚪ [SWAP] Skipped — no new SOL claimed this cycle.");
     return;
   }
 
-  // Swap 70% of that claimed SOL
   const spend = claimed * 0.7;
   console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
 
@@ -330,10 +330,9 @@ async function triggerSwap() {
   }
 }
 
-
 async function snapshotAndDistribute() {
   console.log("🎁 [AIRDROP] Snapshotting holders...");
-  const holders = (await getHoldersAllBase(holdersMintPk)).map((h: any) => h.wallet).filter(Boolean);
+  const holders = await getHoldersAllBase(holdersMintPk);
   if (!holders.length) return console.log("⚪ [AIRDROP] No holders found.");
   await simpleAirdropEqual(airdropMintPk, holders);
 }
@@ -362,4 +361,3 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
-
