@@ -36,9 +36,9 @@ const JUP_429_SLEEP_MS = Number(process.env.JUP_429_SLEEP_MS ?? 1000);
 const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPORTS ?? 5_000);
 const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 400_000);
 
-const AIRDROP_BATCH_SIZE = Number(process.env.AIRDROP_BATCH_SIZE ?? 8);
-const AIRDROP_MAX_BATCH_RETRIES = Number(process.env.AIRDROP_MAX_BATCH_RETRIES ?? 3);
-const AIRDROP_MIN_TX_GAP_MS = Number(process.env.AIRDROP_MIN_TX_GAP_MS ?? 1200);
+const _BATCH_SIZE = Number(process.env._BATCH_SIZE ?? 8);
+const _MAX_BATCH_RETRIES = Number(process.env._MAX_BATCH_RETRIES ?? 3);
+const _MIN_TX_GAP_MS = Number(process.env._MIN_TX_GAP_MS ?? 1200);
 
 if (!TRACKED_MINT || !REWARD_WALLET || !DEV_WALLET_PRIVATE_KEY)
   throw new Error("Missing TRACKED_MINT, REWARD_WALLET, or DEV_WALLET_PRIVATE_KEY");
@@ -57,7 +57,7 @@ function toKeypair(secret: string) {
 }
 const devWallet = toKeypair(DEV_WALLET_PRIVATE_KEY);
 const holdersMintPk = new PublicKey(TRACKED_MINT);
-const airdropMintPk = new PublicKey(AIRDROP_MINT);
+const MintPk = new PublicKey(_MINT);
 
 /* ================= UTILS ================= */
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -218,8 +218,8 @@ async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: strin
   return Array.from(out.entries()).map(([wallet, amountBase]) => ({ wallet, amountBase }));
 }
 
-/* ================= AIRDROP ================= */
-async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
+/* =================  ================= */
+async function simpleEqual(mint: PublicKey, holdersIn: string[]) {
   const seen = new Set<string>();
   const holders = holdersIn.filter(w => {
     if (!w) return false;
@@ -228,7 +228,7 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
     seen.add(w);
     return true;
   });
-  if (!holders.length) return console.log("⚪ [AIRDROP] No holders.");
+  if (!holders.length) return console.log("⚪ [] No holders.");
 
   const info = await withRetries(c => c.getAccountInfo(mint, "confirmed"), 5);
   if (!info) throw new Error("Mint account not found");
@@ -238,16 +238,16 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
   const decimals = mintInfo.decimals;
 
   const poolBase = await tokenBalanceBase(devWallet.publicKey, mint);
-  if (poolBase <= 0n) return console.log("⚪ [AIRDROP] No token balance.");
+  if (poolBase <= 0n) return console.log("⚪ [] No token balance.");
 
   const toSend = (poolBase * 90n) / 100n;
   const perHolder = toSend / BigInt(holders.length);
-  if (perHolder <= 0n) return console.log("⚪ [AIRDROP] Nothing to send.");
+  if (perHolder <= 0n) return console.log("⚪ [] Nothing to send.");
 
-  console.log(`🎯 [AIRDROP] ${holders.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
+  console.log(`🎯 [] ${holders.length} holders | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens`);
 
   const fromAta = getAssociatedTokenAddressSync(mint, devWallet.publicKey, false, tokenProgram, ASSOCIATED_TOKEN_PROGRAM_ID);
-  const BATCH = Math.max(3, Math.min(AIRDROP_BATCH_SIZE, 6));
+  const BATCH = Math.max(3, Math.min(_BATCH_SIZE, 6));
 
   for (let i = 0; i < holders.length; i += BATCH) {
     const group = holders.slice(i, i + BATCH);
@@ -264,7 +264,7 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
           createTransferCheckedInstruction(fromAta, mint, toAta, devWallet.publicKey, perHolder, decimals, [], tokenProgram)
         );
       } catch (e) {
-        console.warn(`[AIRDROP] invalid ${w}: ${String((e as any)?.message || e)}`);
+        console.warn(`[] invalid ${w}: ${String((e as any)?.message || e)}`);
       }
     }
 
@@ -282,31 +282,30 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
       tx.sign(devWallet);
       const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
       await connection.confirmTransaction(sig, "confirmed");
-      console.log(`✅ [AIRDROP] Sent batch ${group.length} | Tx: ${sig}`);
+      console.log(`✅ [] Sent batch ${group.length} | Tx: ${sig}`);
     } catch (e: any) {
-      console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
+      console.warn(`⚠️ [] batch failed: ${String(e?.message || e)}`);
     }
   }
 
-  console.log("🎉 [AIRDROP] Complete.");
+  console.log("🎉 [] Complete.");
 }
 
-/* ================= AIRDROP (PROPORTIONAL) ================= */
+/* ================= AIRDROP (PROPORTIONAL, PARALLEL 8×8 WITH RETRIES) ================= */
 async function simpleAirdropProportional(
   mint: PublicKey,
   weightsIn: Array<{ wallet: string; weight: bigint }>
 ) {
   const seen = new Set<string>();
-  const weights = weightsIn
-    .filter(it => {
-      const w = it.wallet;
-      if (!w) return false;
-      if (w === devWallet.publicKey.toBase58()) return false;
-      if (seen.has(w)) return false;
-      if (it.weight <= 0n) return false;
-      seen.add(w);
-      return true;
-    });
+  const weights = weightsIn.filter(it => {
+    const w = it.wallet;
+    if (!w) return false;
+    if (w === devWallet.publicKey.toBase58()) return false;
+    if (seen.has(w)) return false;
+    if (it.weight <= 0n) return false;
+    seen.add(w);
+    return true;
+  });
 
   if (!weights.length) return console.log("⚪ [AIRDROP] No eligible holders.");
 
@@ -325,7 +324,9 @@ async function simpleAirdropProportional(
   if (totalWeight <= 0n) return console.log("⚪ [AIRDROP] Total weight is zero.");
 
   console.log(
-    `🎯 [AIRDROP] ${weights.length} eligible | Total ${(Number(toSend) / 10 ** decimals).toFixed(6)} tokens | Proportional`
+    `🎯 [AIRDROP] ${weights.length} eligible | Total ${(Number(toSend) / 10 ** decimals).toFixed(
+      6
+    )} tokens | Proportional`
   );
 
   const fromAta = getAssociatedTokenAddressSync(
@@ -336,60 +337,77 @@ async function simpleAirdropProportional(
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
 
-  const BATCH = Math.max(3, Math.min(AIRDROP_BATCH_SIZE, 6));
+  const BATCH = 8;
+  const PARALLEL = 8;
+  const MAX_RETRIES = 3;
 
+  // Split all weights into batches of 8 holders
+  const groups: Array<typeof weights> = [];
   for (let i = 0; i < weights.length; i += BATCH) {
-    const group = weights.slice(i, i + BATCH);
-    const ixs: any[] = [
-      createAssociatedTokenAccountIdempotentInstruction(
-        devWallet.publicKey,
-        fromAta,
-        devWallet.publicKey,
-        mint,
-        tokenProgram,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      ),
-    ];
+    groups.push(weights.slice(i, i + BATCH));
+  }
 
-    for (const { wallet, weight } of group) {
-      try {
-        const to = new PublicKey(wallet);
-        const toAta = getAssociatedTokenAddressSync(
+  let pending = [...groups];
+  let attempt = 0;
+
+  while (pending.length > 0 && attempt < MAX_RETRIES) {
+    attempt++;
+    console.log(`🚀 [AIRDROP] Sending ${pending.length} batches (attempt ${attempt})`);
+
+    const { blockhash } = await connection.getLatestBlockhash("confirmed");
+
+    // Build txs for this round
+    const txs = pending.map((group, gi) => {
+      const ixs: any[] = [
+        createAssociatedTokenAccountIdempotentInstruction(
+          devWallet.publicKey,
+          fromAta,
+          devWallet.publicKey,
           mint,
-          to,
-          true,
           tokenProgram,
           ASSOCIATED_TOKEN_PROGRAM_ID
-        );
-        const amt = (toSend * weight) / totalWeight;
-        if (amt <= 0n) continue;
-        ixs.push(
-          createAssociatedTokenAccountIdempotentInstruction(
-            devWallet.publicKey,
-            toAta,
-            to,
+        ),
+      ];
+
+      for (const { wallet, weight } of group) {
+        try {
+          const to = new PublicKey(wallet);
+          const toAta = getAssociatedTokenAddressSync(
             mint,
+            to,
+            true,
             tokenProgram,
             ASSOCIATED_TOKEN_PROGRAM_ID
-          ),
-          createTransferCheckedInstruction(
-            fromAta,
-            mint,
-            toAta,
-            devWallet.publicKey,
-            amt,
-            decimals,
-            [],
-            tokenProgram
-          )
-        );
-      } catch (e) {
-        console.warn(`[AIRDROP] invalid ${wallet}: ${String((e as any)?.message || e)}`);
+          );
+          const amt = (toSend * weight) / totalWeight;
+          if (amt <= 0n) continue;
+          ixs.push(
+            createAssociatedTokenAccountIdempotentInstruction(
+              devWallet.publicKey,
+              toAta,
+              to,
+              mint,
+              tokenProgram,
+              ASSOCIATED_TOKEN_PROGRAM_ID
+            ),
+            createTransferCheckedInstruction(
+              fromAta,
+              mint,
+              toAta,
+              devWallet.publicKey,
+              amt,
+              decimals,
+              [],
+              tokenProgram
+            )
+          );
+        } catch (e) {
+          console.warn(`[AIRDROP] invalid ${wallet}: ${String((e as any)?.message || e)}`);
+        }
       }
-    }
 
-    if (ixs.length <= 1) continue;
-    try {
+      if (ixs.length <= 1) return null;
+
       const tx = new Transaction();
       tx.add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
@@ -397,19 +415,58 @@ async function simpleAirdropProportional(
         ...ixs
       );
       tx.feePayer = devWallet.publicKey;
-      const { blockhash } = await connection.getLatestBlockhash("confirmed");
       tx.recentBlockhash = blockhash;
       tx.sign(devWallet);
-      const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-      await connection.confirmTransaction(sig, "confirmed");
-      console.log(`✅ [AIRDROP] Sent proportional batch ${group.length} | Tx: ${sig}`);
-    } catch (e: any) {
-      console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
+      return { tx, label: `batch#${gi + 1}` };
+    }).filter(Boolean) as { tx: Transaction; label: string }[];
+
+    const nextRound: typeof pending = [];
+
+    // Send in waves of up to 8 txs in parallel
+    for (let i = 0; i < txs.length; i += PARALLEL) {
+      const wave = txs.slice(i, i + PARALLEL);
+      console.log(`🌊 [AIRDROP] Sending wave ${i / PARALLEL + 1}/${Math.ceil(txs.length / PARALLEL)} (${wave.length} txs)`);
+
+      const results = await Promise.allSettled(
+        wave.map(async ({ tx, label }) => {
+          try {
+            const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+            await connection.confirmTransaction(sig, "confirmed");
+            console.log(`✅ [AIRDROP] ${label} confirmed | ${sig}`);
+            return true;
+          } catch (e: any) {
+            console.warn(`⚠️ [AIRDROP] ${label} failed: ${String(e?.message || e)}`);
+            return false;
+          }
+        })
+      );
+
+      // Retry failed ones
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].status === "fulfilled" && results[j].value === false) {
+          nextRound.push(pending[i + j]);
+        }
+      }
+
+      await sleep(1000); // small delay between waves
+    }
+
+    if (nextRound.length > 0) {
+      console.log(`🔁 [AIRDROP] Retrying ${nextRound.length} failed batches...`);
+      pending = nextRound;
+      await sleep(2000);
+    } else {
+      break;
     }
   }
 
-  console.log("🎉 [AIRDROP] Proportional complete.");
+  if (pending.length > 0) {
+    console.warn(`❌ [AIRDROP] ${pending.length} batches still failed after ${MAX_RETRIES} retries.`);
+  } else {
+    console.log("🎉 [AIRDROP] Proportional complete.");
+  }
 }
+
 
 /* ================= CLAIM / SWAP / LOOP ================= */
 let lastClaimState: null | { claimedSol: number; claimSig: string | null } = null;
@@ -500,3 +557,4 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
