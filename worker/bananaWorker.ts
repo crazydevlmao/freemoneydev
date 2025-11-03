@@ -480,7 +480,7 @@ async function snapshotAndDistribute() {
   const trackedDecimals = trackedMintInfo.decimals;
 
   const scale = 10n ** BigInt(trackedDecimals);
-  const MIN_BASE = 100_000n * scale;
+  const MIN_BASE = 200_000n * scale;
   const MAX_BASE = 50_000_000n * scale;
 
   const eligible = holdersAll
@@ -505,7 +505,7 @@ async function loop() {
       await sleep(30_000);
       await snapshotAndDistribute();
       console.log("🕐 60s cooldown before next cycle...");
-      await sleep(60_000);
+      await sleep(5 * 60_000);
     } catch (e: any) {
       console.error("💥 [CYCLE ERROR]", e?.message || e);
       await sleep(5000);
@@ -517,4 +517,5 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
