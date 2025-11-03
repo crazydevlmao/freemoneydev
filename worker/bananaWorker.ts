@@ -456,14 +456,29 @@ async function triggerSwap() {
   const spend = claimed * 0.7;
   console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
 
-  try {
-    const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
-    const sig = await jupSwap(connection, devWallet, q);
-    console.log(`✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${AIRDROP_MINT} | Tx: ${sig}`);
-  } catch (e: any) {
-    console.error(`❌ [SWAP] Failed: ${e?.message || e}`);
+  let tries = 0;
+  while (true) {
+    tries++;
+    try {
+      const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
+      const sig = await jupSwap(connection, devWallet, q);
+      console.log(`✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${AIRDROP_MINT} | Tx: ${sig}`);
+      return; // success → exit loop
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|quote_failed|swap_failed/i.test(msg);
+      if (retryable) {
+        const delay = 2000 * Math.min(tries, 10) + Math.random() * 1000;
+        console.warn(`⚠️ [SWAP] Retry #${tries} after ${Math.floor(delay)}ms (${msg})`);
+        await sleep(delay);
+        continue;
+      }
+      console.error(`❌ [SWAP] Failed permanently: ${msg}`);
+      break;
+    }
   }
 }
+
 
 /* ================= SNAPSHOT & DISTRIBUTE ================= */
 async function snapshotAndDistribute() {
@@ -517,6 +532,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
