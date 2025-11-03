@@ -504,7 +504,7 @@ async function loop() {
       console.log("⏳ 30s pause → next: AIRDROP");
       await sleep(30_000);
       await snapshotAndDistribute();
-      console.log("🕐 60s cooldown before next cycle...");
+      console.log("🕐 300s cooldown before next cycle...");
       await sleep(5 * 60_000);
     } catch (e: any) {
       console.error("💥 [CYCLE ERROR]", e?.message || e);
@@ -517,5 +517,6 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
