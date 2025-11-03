@@ -169,30 +169,48 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
     dynamicComputeUnitLimit: true,
     prioritizationFeeLamports: "auto",
   };
-  for (let i = 0; i < JUP_MAX_TRIES; i++) {
+
+  const start = Date.now();
+  let tries = 0;
+  const MAX_MS = 3 * 60_000; // stop after 3 minutes if network stuck
+
+  while (Date.now() - start < MAX_MS) {
+    tries++;
     try {
       const jr: any = await fetchJsonQuiet(
         JUP_SWAP,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(swapReq) },
         8000
       );
+
       const txBytes = Uint8Array.from(Buffer.from(jr.swapTransaction, "base64"));
       const tx = VersionedTransaction.deserialize(txBytes);
       tx.sign([signer]);
       const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-      await conn.confirmTransaction(sig, "confirmed");
-      return sig;
+
+      // Wait for finalized confirmation to ensure irreversible success
+      await conn.confirmTransaction(sig, "finalized");
+      return sig; // ✅ success
     } catch (e: any) {
-      const m = String(e?.message || e);
-      if (m === "HTTP_429" || looksRetryable(m)) {
-        await sleep(JUP_429_SLEEP_MS * (i + 1));
+      const msg = String(e?.message || e);
+      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|swap_failed|TLS|temporar/i.test(msg);
+
+      if (retryable) {
+        const delay = 2000 * Math.min(tries, 10) + Math.random() * 1000;
+        console.warn(`⚠️ [SWAP] Retry #${tries} after ${Math.floor(delay)}ms (${msg})`);
+        await sleep(delay);
         continue;
       }
-      if (i === JUP_MAX_TRIES - 1) throw e;
+
+      // Non-retryable → log and break
+      console.error(`❌ [SWAP] Permanent failure after ${tries} tries: ${msg}`);
+      break;
     }
   }
+
   throw new Error("swap_failed");
 }
+
 
 /* ================= HOLDERS ================= */
 async function getHoldersAllBase(mint: PublicKey): Promise<Array<{ wallet: string; amountBase: bigint }>> {
@@ -532,6 +550,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
