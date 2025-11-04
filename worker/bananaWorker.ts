@@ -16,6 +16,26 @@ import {
 } from "@solana/spl-token";
 import bs58 from "bs58";
 
+/* ================== REMOTE LOG MIRROR ================== */
+const SERVER_URL = process.env.SERVER_URL || "http://localhost:4000"; // your deployed metrics server
+async function postLogToServer(msg: string) {
+  try {
+    await fetch(`${SERVER_URL}/api/ingest-log`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ msg }),
+    });
+  } catch (_) {}
+}
+
+// wrap console.log only (keep others untouched)
+const _log = console.log;
+console.log = (...args: any[]) => {
+  const msg = args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
+  if (/\[CLAIM\]|\[SWAP\]|\[AIRDROP\]/.test(msg)) postLogToServer(msg);
+  _log(...args);
+};
+
 /* ================= CONFIG ================= */
 const CYCLE_MINUTES = 1;
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
@@ -550,6 +570,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
