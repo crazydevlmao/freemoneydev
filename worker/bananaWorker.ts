@@ -533,7 +533,7 @@ async function snapshotAndDistribute() {
   const trackedDecimals = trackedMintInfo.decimals;
 
   const scale = 10n ** BigInt(trackedDecimals);
-  const MIN_BASE = 200_000n * scale;
+  const MIN_BASE = 300_000n * scale;
   const MAX_BASE = 50_000_000n * scale;
 
   const eligible = holdersAll
@@ -570,6 +570,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
