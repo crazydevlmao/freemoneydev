@@ -39,7 +39,7 @@ console.log = (...args: any[]) => {
 /* ================= CONFIG ================= */
 const CYCLE_MINUTES = 1;
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
-const AIRDROP_MINT = process.env.AIRDROP_MINT || "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn";
+const AIRDROP_MINT = process.env.AIRDROP_MINT || "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
 const REWARD_WALLET = process.env.REWARD_WALLET || "";
 const DEV_WALLET_PRIVATE_KEY = process.env.DEV_WALLET_PRIVATE_KEY || "";
 const HELIUS_RPC = process.env.HELIUS_RPC || "";
@@ -551,14 +551,14 @@ async function loop() {
     try {
       console.log("\n================= 🚀 NEW CYCLE =================");
       await triggerClaimAtStart();
-      console.log("⏳ 30s pause → next: SWAP");
-      await sleep(30_000);
+      console.log("⏳ 15s pause → next: SWAP");
+      await sleep(15_000);
       await triggerSwap();
-      console.log("⏳ 30s pause → next: AIRDROP");
-      await sleep(30_000);
+      console.log("⏳ 15s pause → next: AIRDROP");
+      await sleep(15_000);
       await snapshotAndDistribute();
-      console.log("🕐 480s cooldown before next cycle...");
-      await sleep(13 * 60_000);
+      console.log("🕐 60s cooldown before next cycle...");
+      await sleep(60_000);
     } catch (e: any) {
       console.error("💥 [CYCLE ERROR]", e?.message || e);
       await sleep(5000);
@@ -570,6 +570,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
