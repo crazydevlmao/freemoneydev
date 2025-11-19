@@ -39,7 +39,7 @@ console.log = (...args: any[]) => {
 /* ================= CONFIG ================= */
 const CYCLE_MINUTES = 1;
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
-const AIRDROP_MINT = process.env.AIRDROP_MINT || "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn";
+const AIRDROP_MINT = process.env.AIRDROP_MINT || "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
 const REWARD_WALLET = process.env.REWARD_WALLET || "";
 const DEV_WALLET_PRIVATE_KEY = process.env.DEV_WALLET_PRIVATE_KEY || "";
 const HELIUS_RPC = process.env.HELIUS_RPC || "";
@@ -491,7 +491,7 @@ async function triggerSwap() {
     return;
   }
 
-  const spend = claimed * 0.7;
+  const spend = claimed * 0.6;
   console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
 
   let tries = 0;
@@ -570,6 +570,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
