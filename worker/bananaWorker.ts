@@ -167,8 +167,8 @@ async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) 
 async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
   const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
   const url =
-    `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}` +
-    `&slippageBps=${slippageBps}&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
+  `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}` +
+  `&slippageBps=${slippageBps}&dexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
   for (let i = 0; i < JUP_MAX_TRIES; i++) {
     try {
       const j: any = await fetchJsonQuiet(url, {}, 6000);
@@ -622,3 +622,4 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
