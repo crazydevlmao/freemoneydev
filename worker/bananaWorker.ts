@@ -159,28 +159,28 @@ async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) 
   }
 }
 
+// single attempt quote, no inner retry loop
 async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
   const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
   const url =
     `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}` +
     `&slippageBps=${slippageBps}&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
-  for (let i = 0; i < JUP_MAX_TRIES; i++) {
-    try {
-      const j: any = await fetchJsonQuiet(url, {}, 6000);
-      if (!j?.routePlan?.length) throw new Error("no_route");
-      return j;
-    } catch (e: any) {
-      const m = String(e?.message || e);
-      if (m === "HTTP_429" || looksRetryable(m)) {
-        await sleep(JUP_429_SLEEP_MS * (i + 1));
-        continue;
-      }
-      if (i === JUP_MAX_TRIES - 1) throw e;
+
+  try {
+    const j: any = await fetchJsonQuiet(url, {}, 6000);
+    if (!j?.routePlan?.length) {
+      console.warn("⚠️ [JUP_QUOTE] no route in quote response");
+      throw new Error("quote_failed");
     }
+    return j;
+  } catch (e: any) {
+    const m = String(e?.message || e);
+    console.warn(`⚠️ [JUP_QUOTE] failed: ${m}`);
+    throw e;
   }
-  throw new Error("quote_failed");
 }
 
+// single attempt swap, no inner retry loop
 async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
   const swapReq = {
     quoteResponse: quoteResp,
@@ -307,7 +307,7 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
       await connection.confirmTransaction(sig, "confirmed");
       console.log(`✅ [AIRDROP] Sent batch ${group.length} | Tx: ${sig}`);
     } catch (e: any) {
-      console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
+      console.warn(`⚠️ [AIRDROP] batch failed: ${String((e?.message || e))}`);
     }
   }
 
@@ -439,7 +439,7 @@ async function simpleAirdropProportional(
           await connection.confirmTransaction(sig, "confirmed");
           console.log(`✅ [AIRDROP] Wave batch ${i + gi + 1} | ${group.length} holders | ${sig}`);
         } catch (e: any) {
-          console.warn(`⚠️ [AIRDROP] batch failed: ${String(e?.message || e)}`);
+          console.warn(`⚠️ [AIRDROP] batch failed: ${String((e?.message || e))}`);
         }
       })
     );
@@ -495,8 +495,7 @@ async function triggerSwap() {
     } catch (e: any) {
       const msg = String(e?.message || e);
 
-      // Only retry on classic network type errors.
-      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed/i.test(
+      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|quote_failed|swap_failed/i.test(
         msg
       );
 
@@ -523,7 +522,6 @@ async function triggerSwap() {
   // At this point we just skip swap for this cycle and move on.
   console.log("⏭️ [SWAP] Skipping swap for this cycle, continuing loop.");
 }
-
 
 
 /* ================= SNAPSHOT & DISTRIBUTE ================= */
@@ -578,17 +576,3 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
