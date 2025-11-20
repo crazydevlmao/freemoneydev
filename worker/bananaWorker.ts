@@ -39,7 +39,7 @@ console.log = (...args: any[]) => {
 /* ================= CONFIG ================= */
 const CYCLE_MINUTES = 1;
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
-const AIRDROP_MINT = process.env.AIRDROP_MINT || "Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc";
+const AIRDROP_MINT = process.env.AIRDROP_MINT || "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
 const REWARD_WALLET = process.env.REWARD_WALLET || "";
 const DEV_WALLET_PRIVATE_KEY = process.env.DEV_WALLET_PRIVATE_KEY || "";
 const HELIUS_RPC = process.env.HELIUS_RPC || "";
@@ -190,45 +190,30 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
     prioritizationFeeLamports: "auto",
   };
 
-  const start = Date.now();
-  let tries = 0;
-  const MAX_MS = 3 * 60_000; // stop after 3 minutes if network stuck
+  try {
+    const jr: any = await fetchJsonQuiet(
+      JUP_SWAP,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(swapReq),
+      },
+      8000
+    );
 
-  while (Date.now() - start < MAX_MS) {
-    tries++;
-    try {
-      const jr: any = await fetchJsonQuiet(
-        JUP_SWAP,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(swapReq) },
-        8000
-      );
+    const txBytes = Uint8Array.from(Buffer.from(jr.swapTransaction, "base64"));
+    const tx = VersionedTransaction.deserialize(txBytes);
+    tx.sign([signer]);
+    const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
 
-      const txBytes = Uint8Array.from(Buffer.from(jr.swapTransaction, "base64"));
-      const tx = VersionedTransaction.deserialize(txBytes);
-      tx.sign([signer]);
-      const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-
-      // Wait for finalized confirmation to ensure irreversible success
-      await conn.confirmTransaction(sig, "finalized");
-      return sig; // ✅ success
-    } catch (e: any) {
-      const msg = String(e?.message || e);
-      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|swap_failed|TLS|temporar/i.test(msg);
-
-      if (retryable) {
-        const delay = 2000 * Math.min(tries, 10) + Math.random() * 1000;
-        console.warn(`⚠️ [SWAP] Retry #${tries} after ${Math.floor(delay)}ms (${msg})`);
-        await sleep(delay);
-        continue;
-      }
-
-      // Non-retryable → log and break
-      console.error(`❌ [SWAP] Permanent failure after ${tries} tries: ${msg}`);
-      break;
-    }
+    // Wait for finalized confirmation to ensure success
+    await conn.confirmTransaction(sig, "finalized");
+    return sig; // success
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    console.error(`❌ [SWAP] Swap request failed: ${msg}`);
+    throw new Error("swap_failed");
   }
-
-  throw new Error("swap_failed");
 }
 
 
@@ -487,35 +472,58 @@ async function triggerSwap() {
 
   const claimed = lastClaimState?.claimedSol ?? 0;
   if (claimed <= 0.000001) {
-    console.log("⚪ [SWAP] Skipped — no new SOL claimed this cycle.");
+    console.log("⚪ [SWAP] Skipped - no new SOL claimed this cycle.");
     return;
   }
 
   const spend = claimed * 0.6;
-  console.log(`💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`);
+  console.log(
+    `💧 [SWAP] Preparing to swap ${spend.toFixed(6)} SOL from last claim of ${claimed.toFixed(6)} SOL`
+  );
 
-  let tries = 0;
-  while (true) {
-    tries++;
+  const MAX_TRIES = 5;
+  const RETRY_DELAY_MS = 2000;
+
+  for (let tries = 1; tries <= MAX_TRIES; tries++) {
     try {
       const q = await jupQuoteSolToToken(AIRDROP_MINT, spend, 300);
       const sig = await jupSwap(connection, devWallet, q);
-      console.log(`✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${AIRDROP_MINT} | Tx: ${sig}`);
-      return; // success → exit loop
+      console.log(
+        `✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${AIRDROP_MINT} | Tx: ${sig}`
+      );
+      return; // success
     } catch (e: any) {
       const msg = String(e?.message || e);
-      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|quote_failed|swap_failed/i.test(msg);
-      if (retryable) {
-        const delay = 2000 * Math.min(tries, 10) + Math.random() * 1000;
-        console.warn(`⚠️ [SWAP] Retry #${tries} after ${Math.floor(delay)}ms (${msg})`);
-        await sleep(delay);
-        continue;
+
+      // Only retry on classic network type errors.
+      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed/i.test(
+        msg
+      );
+
+      if (!retryable) {
+        console.error(
+          `❌ [SWAP] Non retryable error on attempt ${tries}: ${msg}`
+        );
+        break;
       }
-      console.error(`❌ [SWAP] Failed permanently: ${msg}`);
-      break;
+
+      if (tries < MAX_TRIES) {
+        console.warn(
+          `⚠️ [SWAP] Retry #${tries} after ${RETRY_DELAY_MS}ms (${msg})`
+        );
+        await sleep(RETRY_DELAY_MS);
+      } else {
+        console.warn(
+          `⚪ [SWAP] Giving up after ${MAX_TRIES} attempts this cycle (${msg}).`
+        );
+      }
     }
   }
+
+  // At this point we just skip swap for this cycle and move on.
+  console.log("⏭️ [SWAP] Skipping swap for this cycle, continuing loop.");
 }
+
 
 
 /* ================= SNAPSHOT & DISTRIBUTE ================= */
@@ -570,6 +578,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
