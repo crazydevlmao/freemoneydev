@@ -56,7 +56,11 @@ const JUP_BASE = process.env.JUP_BASE || "https://lite-api.jup.ag/swap/v1";
 const JUP_QUOTE = `${JUP_BASE}/quote`;
 const JUP_SWAP = `${JUP_BASE}/swap`;
 
-const JUP_MAX_TRIES = Number(process.env.JUP_MAX_TRIES ?? 6);
+// make JUP_MAX_TRIES robust against empty or invalid env
+const _parsedJupMaxTries = Number(process.env.JUP_MAX_TRIES);
+const JUP_MAX_TRIES =
+  Number.isFinite(_parsedJupMaxTries) && _parsedJupMaxTries > 0 ? _parsedJupMaxTries : 6;
+
 const JUP_429_SLEEP_MS = Number(process.env.JUP_429_SLEEP_MS ?? 1000);
 const PRIORITY_FEE_MICRO_LAMPORTS = Number(process.env.PRIORITY_FEE_MICRO_LAMPORTS ?? 5_000);
 const COMPUTE_UNIT_LIMIT = Number(process.env.COMPUTE_UNIT_LIMIT ?? 400_000);
@@ -167,14 +171,18 @@ async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) 
 async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
   const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
   const url =
-  `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}` +
-  `&slippageBps=${slippageBps}&dexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
+    `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}` +
+    `&slippageBps=${slippageBps}&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
+
+  let lastErr: any = null;
+
   for (let i = 0; i < JUP_MAX_TRIES; i++) {
     try {
       const j: any = await fetchJsonQuiet(url, {}, 6000);
       if (!j?.routePlan?.length) throw new Error("no_route");
       return j;
     } catch (e: any) {
+      lastErr = e;
       const m = String(e?.message || e);
       if (m === "HTTP_429" || looksRetryable(m)) {
         await sleep(JUP_429_SLEEP_MS * (i + 1));
@@ -183,7 +191,7 @@ async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippage
       if (i === JUP_MAX_TRIES - 1) throw e;
     }
   }
-  throw new Error("quote_failed");
+  throw new Error(`quote_failed: ${String(lastErr?.message || lastErr || "no_attempt")}`);
 }
 
 async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
@@ -219,10 +227,12 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
 
       // Wait for finalized confirmation to ensure irreversible success
       await conn.confirmTransaction(sig, "finalized");
-      return sig; // ✅ success
+      return sig; // success
     } catch (e: any) {
       const msg = String(e?.message || e);
-      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|swap_failed|TLS|temporar/i.test(msg);
+      const retryable = /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|swap_failed|TLS|temporar/i.test(
+        msg
+      );
 
       if (retryable) {
         const delay = 2000 * Math.min(tries, 10) + Math.random() * 1000;
@@ -526,7 +536,7 @@ async function triggerSwap() {
 
   const claimed = lastClaimState?.claimedSol ?? 0;
   if (claimed <= 0.000001) {
-    console.log("⚪ [SWAP] Skipped — no new SOL claimed this cycle.");
+    console.log("⚪ [SWAP] Skipped - no new SOL claimed this cycle.");
     return;
   }
 
@@ -548,7 +558,7 @@ async function triggerSwap() {
     } catch (e: any) {
       const msg = String(e?.message || e);
       const retryable =
-        /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|quote_failed|swap_failed/i.test(
+        /429|timeout|rate.?limit|blockhash|FetchError|ECONN|ETIMEDOUT|Connection closed|TLS|temporar/i.test(
           msg
         );
       if (retryable) {
@@ -622,4 +632,3 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
-
