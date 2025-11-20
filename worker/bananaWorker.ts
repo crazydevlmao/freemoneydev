@@ -39,7 +39,7 @@ console.log = (...args: any[]) => {
 /* ================= CONFIG ================= */
 const CYCLE_MINUTES = 1;
 const TRACKED_MINT = process.env.TRACKED_MINT || "";
-const AIRDROP_MINT = process.env.AIRDROP_MINT || "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
+const AIRDROP_MINT = process.env.AIRDROP_MINT || "Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc";
 const REWARD_WALLET = process.env.REWARD_WALLET || "";
 const DEV_WALLET_PRIVATE_KEY = process.env.DEV_WALLET_PRIVATE_KEY || "";
 const HELIUS_RPC = process.env.HELIUS_RPC || "";
@@ -570,6 +570,7 @@ loop().catch(e => {
   console.error("💣 bananaWorker crashed", e?.message || e);
   process.exit(1);
 });
+
 
 
 
