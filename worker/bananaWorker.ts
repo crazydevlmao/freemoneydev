@@ -52,11 +52,12 @@ const QUICKNODE_RPC = process.env.QUICKNODE_RPC || "";
 const PUMPORTAL_KEY = (process.env.PUMPORTAL_KEY || "").trim();
 const PUMPORTAL_BASE = "https://pumpportal.fun";
 
+// keep using swap/v1, but you can override via env if needed
 const JUP_BASE = process.env.JUP_BASE || "https://lite-api.jup.ag/swap/v1";
 const JUP_QUOTE = `${JUP_BASE}/quote`;
 const JUP_SWAP = `${JUP_BASE}/swap`;
 
-// make JUP_MAX_TRIES robust against empty or invalid env
+// robust JUP_MAX_TRIES in case env is missing or invalid
 const _parsedJupMaxTries = Number(process.env.JUP_MAX_TRIES);
 const JUP_MAX_TRIES =
   Number.isFinite(_parsedJupMaxTries) && _parsedJupMaxTries > 0 ? _parsedJupMaxTries : 6;
@@ -170,9 +171,12 @@ async function fetchJsonQuiet(url: string, opts: RequestInit, timeoutMs = 6000) 
 
 async function jupQuoteSolToToken(outMint: string, solUiAmount: number, slippageBps: number) {
   const amountLamports = Math.max(1, Math.floor(solUiAmount * LAMPORTS_PER_SOL));
+
+  // keep it simple and aligned with Jup quote docs
   const url =
-    `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112&outputMint=${outMint}&amount=${amountLamports}` +
-    `&slippageBps=${slippageBps}&enableDexes=pump,meteora,raydium&onlyDirectRoutes=false&swapMode=ExactIn`;
+    `${JUP_QUOTE}?inputMint=So11111111111111111111111111111111111111112` +
+    `&outputMint=${outMint}&amount=${amountLamports}` +
+    `&slippageBps=${slippageBps}&onlyDirectRoutes=false&swapMode=ExactIn`;
 
   let lastErr: any = null;
 
@@ -241,7 +245,7 @@ async function jupSwap(conn: Connection, signer: Keypair, quoteResp: any) {
         continue;
       }
 
-      // Non-retryable → log and break
+      // Non-retryable -> log and break
       console.error(`❌ [SWAP] Permanent failure after ${tries} tries: ${msg}`);
       break;
     }
@@ -370,7 +374,7 @@ async function simpleAirdropEqual(mint: PublicKey, holdersIn: string[]) {
   console.log("🎉 [AIRDROP] Complete.");
 }
 
-/* ================= AIRDROP (PROPORTIONAL, 6×6 PARALLEL SAFE) ================= */
+/* ================= AIRDROP (PROPORTIONAL, 6x6 PARALLEL SAFE) ================= */
 async function simpleAirdropProportional(
   mint: PublicKey,
   weightsIn: Array<{ wallet: string; weight: bigint }>
@@ -554,7 +558,7 @@ async function triggerSwap() {
       console.log(
         `✅ [SWAP] Swapped ${spend.toFixed(4)} SOL → ${AIRDROP_MINT} | Tx: ${sig}`
       );
-      return; // success → exit loop
+      return; // success -> exit loop
     } catch (e: any) {
       const msg = String(e?.message || e);
       const retryable =
@@ -613,10 +617,10 @@ async function loop() {
     try {
       console.log("\n================= 🚀 NEW CYCLE =================");
       await triggerClaimAtStart();
-      console.log("⏳ 15s pause → next: SWAP");
+      console.log("⏳ 15s pause -> next: SWAP");
       await sleep(15_000);
       await triggerSwap();
-      console.log("⏳ 15s pause → next: AIRDROP");
+      console.log("⏳ 15s pause -> next: AIRDROP");
       await sleep(15_000);
       await snapshotAndDistribute();
       console.log("🕐 60s cooldown before next cycle...");
